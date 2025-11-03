@@ -1,0 +1,10 @@
+# Make sure clams-python version is explicitly specified, at least the lower bound
+clams-python==1.3.3
+
+transformers>=4.40,<5
+torch>=2.1,<3
+Pillow>=10
+mmif-python[cv]==1.1.2
+einops
+addict
+easydict
