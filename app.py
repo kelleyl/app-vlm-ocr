@@ -3,10 +3,13 @@ VLM OCR Wrapper
 
 This CLAMS app uses a user-specified Hugging Face image-to-text model to transcribe text
 from representative frames of TimeFrame annotations.
+
+Enhanced with DSPy integration for optimized prompts and few-shot learning.
 """
 
 import argparse
 import logging
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -18,6 +21,15 @@ from clams import ClamsApp, Restifier
 from mmif import Mmif, View, Annotation, Document, AnnotationTypes, DocumentTypes
 from mmif.utils import video_document_helper as vdh
 
+# Import DSPy integration (optional - only used if useDSPy=True)
+try:
+    import dspy
+    from dspy_integration import DSPyHFVLM, OCRModule, ArtifactLoader
+    DSPY_AVAILABLE = True
+except ImportError:
+    DSPY_AVAILABLE = False
+    dspy = None
+
 
 class VlmOcr(ClamsApp):
 
@@ -25,6 +37,8 @@ class VlmOcr(ClamsApp):
         super().__init__()
         self._pipeline_cache = {}
         self._prompt_model_cache = {}
+        self._dspy_module_cache = {}  # Cache for loaded DSPy modules
+        self._dspy_lm_cache = {}  # Cache for DSPy LM instances
 
     def _appmetadata(self):
         # using metadata.py
@@ -46,9 +60,17 @@ class VlmOcr(ClamsApp):
         if model_id in self._prompt_model_cache:
             return self._prompt_model_cache[model_id]
         try:
-            tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-            mdl = AutoModel.from_pretrained(model_id, trust_remote_code=True, use_safetensors=True)
-            # don’t force .cuda(); many environments are CPU-only
+            # Check if this is a local DeepSeek-OCR model request
+            if 'deepseek-ai/DeepSeek-OCR' in model_id:
+                local_model_path = "/local-model"
+                print(f"[vlm-ocr] Using local DeepSeek-OCR model at {local_model_path}")
+                tok = AutoTokenizer.from_pretrained(local_model_path, trust_remote_code=True, local_files_only=True)
+                mdl = AutoModel.from_pretrained(local_model_path, trust_remote_code=True, local_files_only=True, use_safetensors=True)
+            else:
+                tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+                mdl = AutoModel.from_pretrained(model_id, trust_remote_code=True, use_safetensors=True)
+
+            # don't force .cuda(); many environments are CPU-only
             mdl = mdl.eval()
         except Exception as e:
             self.logger.error(f"Failed to load prompt-capable model '{model_id}': {e}")
@@ -56,8 +78,131 @@ class VlmOcr(ClamsApp):
         self._prompt_model_cache[model_id] = (tok, mdl)
         return tok, mdl
 
-    def _run_ocr(self, img: np.ndarray, model_id: str, prompt_text: Optional[str]) -> str:
+    def _load_dspy_module(self, model_id: str, artifact_path: Optional[str] = None, dataset_name: Optional[str] = None) -> Optional['OCRModule']:
+        """
+        Load a DSPy OCR module from an artifact.
+
+        Returns None if DSPy is not available or artifact not found.
+        """
+        if not DSPY_AVAILABLE:
+            self.logger.warning("DSPy not available. Install with: pip install dspy-ai")
+            return None
+
+        cache_key = f"{model_id}_{artifact_path}_{dataset_name}"
+        if cache_key in self._dspy_module_cache:
+            self.logger.info(f"Using cached DSPy module for {model_id}")
+            return self._dspy_module_cache[cache_key]
+
+        # Initialize artifact loader
+        artifacts_dir = Path(__file__).parent / "artifacts"
+        loader = ArtifactLoader(artifacts_dir=artifacts_dir)
+
+        # Find or load artifact
+        try:
+            if artifact_path:
+                # Use specific artifact file
+                artifact_file = Path(artifact_path)
+                if not artifact_file.is_absolute():
+                    artifact_file = artifacts_dir / artifact_file
+            else:
+                # Auto-discover artifact
+                artifact_file = loader.find_artifact(model_id, dataset_name)
+
+            if artifact_file is None or not artifact_file.exists():
+                self.logger.info(f"No DSPy artifact found for model={model_id}, dataset={dataset_name}")
+                return None
+
+            self.logger.info(f"Loading DSPy artifact from {artifact_file}")
+
+            # Load the module
+            module = loader.load_artifact(artifact_file)
+
+            # Cache it
+            self._dspy_module_cache[cache_key] = module
+
+            return module
+
+        except Exception as e:
+            self.logger.error(f"Failed to load DSPy module: {e}", exc_info=True)
+            return None
+
+    def _get_or_create_dspy_lm(self, model_id: str) -> Optional['DSPyHFVLM']:
+        """Get or create a DSPy LM interface for the model."""
+        if not DSPY_AVAILABLE:
+            return None
+
+        if model_id in self._dspy_lm_cache:
+            return self._dspy_lm_cache[model_id]
+
+        try:
+            lm = DSPyHFVLM(model_id=model_id)
+            self._dspy_lm_cache[model_id] = lm
+            return lm
+        except Exception as e:
+            self.logger.error(f"Failed to create DSPy LM: {e}")
+            return None
+
+    def _run_ocr_with_dspy(self, img: np.ndarray, model_id: str, dspy_module: 'OCRModule') -> str:
+        """
+        Run OCR using a DSPy module with optimized prompts.
+        """
+        try:
+            # Convert numpy array to PIL Image
+            if isinstance(img, np.ndarray):
+                if img.ndim == 3 and img.shape[2] == 3:
+                    pil_image = Image.fromarray(img[:, :, ::-1].astype(np.uint8))
+                elif img.ndim == 2:
+                    pil_image = Image.fromarray(img.astype(np.uint8)).convert('RGB')
+                else:
+                    pil_image = Image.fromarray(img.astype(np.uint8))
+            else:
+                pil_image = img
+
+            # Save to temp file and create dspy.Image
+            from tempfile import NamedTemporaryFile
+            with NamedTemporaryFile(suffix='.jpg', delete=False) as tf:
+                pil_image.save(tf.name, format='JPEG')
+                dspy_image = dspy.Image(path=tf.name)
+
+                # Run through DSPy module
+                prediction = dspy_module(image=dspy_image)
+
+                # Extract text based on module mode
+                if hasattr(prediction, 'transcription'):
+                    text = prediction.transcription
+                elif hasattr(prediction, 'result'):
+                    text = prediction.result
+                elif hasattr(prediction, 'parsed_fields'):
+                    # For structured mode, serialize fields as JSON
+                    import json
+                    text = json.dumps(prediction.parsed_fields, indent=2)
+                else:
+                    text = str(prediction)
+
+            # Cleanup temp file
+            import os
+            try:
+                os.unlink(tf.name)
+            except:
+                pass
+
+            self.logger.debug(f"DSPy OCR result length: {len(text)}")
+            return text
+
+        except Exception as e:
+            self.logger.error(f"DSPy OCR failed: {e}", exc_info=True)
+            return ""
+
+    def _run_ocr(self, img: np.ndarray, model_id: str, prompt_text: Optional[str], use_dspy: bool = False,
+                 dspy_module: Optional['OCRModule'] = None) -> str:
         print(f"[vlm-ocr] Running OCR with model '{model_id}' on image shape: {getattr(img, 'shape', None)}")
+
+        # DSPy path - use optimized prompts and few-shot learning
+        if use_dspy and dspy_module is not None:
+            self.logger.info(f"Using DSPy-optimized module for OCR")
+            return self._run_ocr_with_dspy(img, model_id, dspy_module)
+
+        # Traditional path - direct model inference
         model_id_str = str(model_id).lower()
         is_prompt_model = any(x in model_id_str for x in [
             'deepseek-ocr', 'deepseek_ai', 'deepseek-ai/deepseek-ocr',
@@ -131,7 +276,8 @@ class VlmOcr(ClamsApp):
         return text
 
     def _process_time_annotation(self, mmif: Mmif, representative: Annotation, new_view: View,
-                                 video_doc: Document, model_id: str, prompt_text: Optional[str]) -> Tuple[int, Optional[str]]:
+                                 video_doc: Document, model_id: str, prompt_text: Optional[str],
+                                 use_dspy: bool = False, dspy_module: Optional['OCRModule'] = None) -> Tuple[int, Optional[str]]:
         print(f"[vlm-ocr] Processing representative type: {representative.at_type}")
         if representative.at_type == AnnotationTypes.TimePoint:
             rep_frame_index = vdh.convert(representative.get("timePoint"),
@@ -148,7 +294,9 @@ class VlmOcr(ClamsApp):
             self.logger.error(f"Representative annotation type {representative.at_type} is not supported.")
             return -1, None
 
-        text_content = self._run_ocr(image, model_id=model_id, prompt_text=prompt_text).strip()
+        text_content = self._run_ocr(image, model_id=model_id, prompt_text=prompt_text,
+                                      use_dspy=use_dspy, dspy_module=dspy_module).strip()
+        print(f"[vlm-ocr] OCR result at timestamp {timestamp}ms: '{text_content}'")
         if not text_content:
             print(f"[vlm-ocr] Empty OCR result at timestamp {timestamp}")
             return timestamp, None
@@ -170,6 +318,42 @@ class VlmOcr(ClamsApp):
         # Default prompt depends on model type - will be set per-model in _run_ocr
         prompt_param = parameters.get("prompt", [""])  # default empty, will use model-specific default
         prompt_text = prompt_param[0] if isinstance(prompt_param, list) and prompt_param else prompt_param
+
+        # DSPy parameters
+        use_dspy_param = parameters.get("useDSPy", [False])
+        use_dspy = use_dspy_param[0] if isinstance(use_dspy_param, list) else use_dspy_param
+        use_dspy = bool(use_dspy)  # Ensure boolean
+
+        dspy_artifact_param = parameters.get("dspyArtifact", [""])
+        dspy_artifact = dspy_artifact_param[0] if isinstance(dspy_artifact_param, list) and dspy_artifact_param else dspy_artifact_param
+
+        dspy_dataset_param = parameters.get("dspyDataset", [""])
+        dspy_dataset = dspy_dataset_param[0] if isinstance(dspy_dataset_param, list) and dspy_dataset_param else dspy_dataset_param
+
+        # Load DSPy module if requested
+        dspy_module = None
+        if use_dspy:
+            self.logger.info("DSPy mode enabled - attempting to load optimized module")
+
+            # Configure DSPy LM
+            dspy_lm = self._get_or_create_dspy_lm(model_id)
+            if dspy_lm and DSPY_AVAILABLE:
+                dspy.settings.configure(lm=dspy_lm)
+
+            # Load module
+            dspy_module = self._load_dspy_module(
+                model_id,
+                artifact_path=dspy_artifact if dspy_artifact else None,
+                dataset_name=dspy_dataset if dspy_dataset else None
+            )
+
+            if dspy_module is None:
+                self.logger.warning("DSPy module not loaded - falling back to traditional OCR")
+                use_dspy = False
+            else:
+                self.logger.info("DSPy module loaded successfully")
+                # Override prompt with DSPy's optimized prompt
+                prompt_text = None  # DSPy module handles prompts internally
 
         # Determine if model is prompt-capable
         model_id_str = str(model_id).lower()
@@ -219,17 +403,17 @@ class VlmOcr(ClamsApp):
                             rep_id = f'{view.id}{Mmif.id_delimiter}{rep_id}'
                         representative = mmif[rep_id]
                         timestamp, text_content = self._process_time_annotation(
-                            mmif, representative, new_view, video_doc, model_id, prompt_text)
+                            mmif, representative, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module)
                 # fallback to middle frame
                 if text_content is None:
                     timestamp, text_content = self._process_time_annotation(
-                        mmif, timeframe, new_view, video_doc, model_id, prompt_text)
+                        mmif, timeframe, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module)
                 self.logger.debug(f'Processed timepoint: {timestamp} ms, recognized text: "{text_content}"')
             # Also check for explicit TimePoint annotations
             for timepoint in view.get_annotations(AnnotationTypes.TimePoint):
                 found_any = True
                 timestamp, text_content = self._process_time_annotation(
-                    mmif, timepoint, new_view, video_doc, model_id, prompt_text)
+                    mmif, timepoint, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module)
                 self.logger.debug(f'Processed timepoint: {timestamp} ms, recognized text: "{text_content}"')
             return found_any
 
@@ -244,10 +428,21 @@ class VlmOcr(ClamsApp):
         if not used_existing_annotations:
             # No TimePoint/TimeFrame annotations found → sample every N frames across the video
             self.logger.info(f'No TimePoint/TimeFrame found. Sampling every {frame_interval} frames as fallback.')
-            print(f"[vlm-ocr] Fallback sampling every {frame_interval} frames")
+            print(f"[vlm-ocr] Fallback sampling every {frame_interval} frames (first minute only)")
             fps = video_doc.get("fps")
+            if fps:
+                max_frames_for_1_minute = int(fps * 60)  # 60 seconds worth of frames
+                print(f"[vlm-ocr] Processing first minute only: max {max_frames_for_1_minute} frames at {fps} fps")
+            else:
+                max_frames_for_1_minute = 1800  # fallback: assume 30fps * 60 seconds
+                print(f"[vlm-ocr] FPS not available, using fallback limit of {max_frames_for_1_minute} frames")
             frame_index = 0
             while True:
+                # Check if we've exceeded the first minute
+                if frame_index > max_frames_for_1_minute:
+                    print(f"[vlm-ocr] Reached first minute limit at frame {frame_index}, stopping")
+                    break
+
                 try:
                     print(f"[vlm-ocr] Attempting to extract frame {frame_index}")
                     images = vdh.extract_frames_as_images(video_doc, [frame_index], as_PIL=False)
@@ -273,7 +468,7 @@ class VlmOcr(ClamsApp):
 
                 tp_ann = new_view.new_annotation(AnnotationTypes.TimePoint, timePoint=timestamp_ms, timeUnit=time_unit)
                 # Reuse existing processing to OCR and align
-                _ = self._process_time_annotation(mmif, tp_ann, new_view, video_doc, model_id, prompt_text)
+                _ = self._process_time_annotation(mmif, tp_ann, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module)
 
                 # advance
                 frame_index += frame_interval
