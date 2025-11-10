@@ -56,14 +56,12 @@ class VlmOcr(ClamsApp):
         self._pipeline_cache[model_id] = pl
         return pl
 
-    def _get_prompt_model(self, model_id: str):
+    def _get_prompt_model(self, model_id: str, local_model_path: Optional[str] = None):
         if model_id in self._prompt_model_cache:
             return self._prompt_model_cache[model_id]
         try:
-            # Check if this is a local DeepSeek-OCR model request
-            if 'deepseek-ai/DeepSeek-OCR' in model_id:
-                local_model_path = "/local-model"
-                print(f"[vlm-ocr] Using local DeepSeek-OCR model at {local_model_path}")
+            if local_model_path:
+                print(f"[vlm-ocr] Using local model at {local_model_path}")
                 tok = AutoTokenizer.from_pretrained(local_model_path, trust_remote_code=True, local_files_only=True)
                 mdl = AutoModel.from_pretrained(local_model_path, trust_remote_code=True, local_files_only=True, use_safetensors=True)
             else:
@@ -194,7 +192,7 @@ class VlmOcr(ClamsApp):
             return ""
 
     def _run_ocr(self, img: np.ndarray, model_id: str, prompt_text: Optional[str], use_dspy: bool = False,
-                 dspy_module: Optional['OCRModule'] = None) -> str:
+                 dspy_module: Optional['OCRModule'] = None, local_model_path: Optional[str] = None) -> str:
         print(f"[vlm-ocr] Running OCR with model '{model_id}' on image shape: {getattr(img, 'shape', None)}")
 
         # DSPy path - use optimized prompts and few-shot learning
@@ -214,7 +212,7 @@ class VlmOcr(ClamsApp):
             if prompt_text is None or str(prompt_text).strip() == '':
                 prompt_text = 'Describe the image'
             try:
-                tok, mdl = self._get_prompt_model(model_id)
+                tok, mdl = self._get_prompt_model(model_id, local_model_path=local_model_path)
                 # DeepSeek-OCR expects a path; save PIL image to a temp file
                 pil_image = img
                 if isinstance(img, np.ndarray):
@@ -277,7 +275,8 @@ class VlmOcr(ClamsApp):
 
     def _process_time_annotation(self, mmif: Mmif, representative: Annotation, new_view: View,
                                  video_doc: Document, model_id: str, prompt_text: Optional[str],
-                                 use_dspy: bool = False, dspy_module: Optional['OCRModule'] = None) -> Tuple[int, Optional[str]]:
+                                 use_dspy: bool = False, dspy_module: Optional['OCRModule'] = None,
+                                 local_model_path: Optional[str] = None) -> Tuple[int, Optional[str]]:
         print(f"[vlm-ocr] Processing representative type: {representative.at_type}")
         if representative.at_type == AnnotationTypes.TimePoint:
             rep_frame_index = vdh.convert(representative.get("timePoint"),
@@ -295,7 +294,7 @@ class VlmOcr(ClamsApp):
             return -1, None
 
         text_content = self._run_ocr(image, model_id=model_id, prompt_text=prompt_text,
-                                      use_dspy=use_dspy, dspy_module=dspy_module).strip()
+                                      use_dspy=use_dspy, dspy_module=dspy_module, local_model_path=local_model_path).strip()
         print(f"[vlm-ocr] OCR result at timestamp {timestamp}ms: '{text_content}'")
         if not text_content:
             print(f"[vlm-ocr] Empty OCR result at timestamp {timestamp}")
@@ -330,10 +329,28 @@ class VlmOcr(ClamsApp):
         dspy_dataset_param = parameters.get("dspyDataset", [""])
         dspy_dataset = dspy_dataset_param[0] if isinstance(dspy_dataset_param, list) and dspy_dataset_param else dspy_dataset_param
 
+        local_model_path_param = parameters.get("localModelPath", [""])
+        local_model_path = local_model_path_param[0] if isinstance(local_model_path_param, list) and local_model_path_param else local_model_path_param
+
         # Load DSPy module if requested
         dspy_module = None
         if use_dspy:
             self.logger.info("DSPy mode enabled - attempting to load optimized module")
+            
+            # First, try to load the module to get the model_id from the artifact
+            loader = ArtifactLoader(artifacts_dir=Path(__file__).parent / "artifacts")
+            artifact_file = None
+            if dspy_artifact:
+                artifact_file = Path(dspy_artifact)
+                if not artifact_file.is_absolute():
+                    artifact_file = loader.artifacts_dir / artifact_file
+            else:
+                artifact_file = loader.find_artifact(model_id, dspy_dataset)
+
+            if artifact_file and artifact_file.exists():
+                artifact_data = loader.get_artifact_metadata(artifact_file)
+                model_id = artifact_data.get("model_id", model_id)
+                self.logger.info(f"Using model_id from artifact: {model_id}")
 
             # Configure DSPy LM
             dspy_lm = self._get_or_create_dspy_lm(model_id)
@@ -403,17 +420,17 @@ class VlmOcr(ClamsApp):
                             rep_id = f'{view.id}{Mmif.id_delimiter}{rep_id}'
                         representative = mmif[rep_id]
                         timestamp, text_content = self._process_time_annotation(
-                            mmif, representative, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module)
+                            mmif, representative, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module, local_model_path)
                 # fallback to middle frame
                 if text_content is None:
                     timestamp, text_content = self._process_time_annotation(
-                        mmif, timeframe, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module)
+                        mmif, timeframe, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module, local_model_path)
                 self.logger.debug(f'Processed timepoint: {timestamp} ms, recognized text: "{text_content}"')
             # Also check for explicit TimePoint annotations
             for timepoint in view.get_annotations(AnnotationTypes.TimePoint):
                 found_any = True
                 timestamp, text_content = self._process_time_annotation(
-                    mmif, timepoint, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module)
+                    mmif, timepoint, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module, local_model_path)
                 self.logger.debug(f'Processed timepoint: {timestamp} ms, recognized text: "{text_content}"')
             return found_any
 
@@ -468,7 +485,7 @@ class VlmOcr(ClamsApp):
 
                 tp_ann = new_view.new_annotation(AnnotationTypes.TimePoint, timePoint=timestamp_ms, timeUnit=time_unit)
                 # Reuse existing processing to OCR and align
-                _ = self._process_time_annotation(mmif, tp_ann, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module)
+                _ = self._process_time_annotation(mmif, tp_ann, new_view, video_doc, model_id, prompt_text, use_dspy, dspy_module, local_model_path)
 
                 # advance
                 frame_index += frame_interval
