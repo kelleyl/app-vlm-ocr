@@ -9,6 +9,16 @@ from clams.app import ClamsApp
 from clams.appmetadata import AppMetadata
 
 
+# Import tested models from llm_utils
+from llm_utils import TESTED_MODELS as LLM_TESTED_MODELS, Backend
+
+# Default model - MLX backend for Apple Silicon
+DEFAULT_MODEL = "mlx:mlx-community/Qwen2-VL-2B-Instruct-4bit"
+
+# Tested model IDs for metadata display (with backend prefix)
+TESTED_MODELS = [f"{m.backend.value}:{m.model_id}" for m in LLM_TESTED_MODELS]
+
+
 # DO NOT CHANGE the function name
 def appmetadata() -> AppMetadata:
     """
@@ -16,21 +26,21 @@ def appmetadata() -> AppMetadata:
     Read these documentations before changing the code below
     - https://sdk.clams.ai/appmetadata.html metadata specification.
     - https://sdk.clams.ai/autodoc/clams.appmetadata.html python API
-    
+
     :return: AppMetadata object holding all necessary information.
     """
     # first set up some basic information
     metadata = AppMetadata(
-        name="CLAMS VLM OCR",
+        name="VLM OCR",
         description=(
-            "CLAMS app that uses a user-specified Hugging Face vision-language or OCR model "
-            "to transcribe text from representative frames in a video segment. Outputs a single "
-            "TextDocument per processed frame and Alignment annotations linking the source TimePoint/TimeFrame."
+            "Applies vision-language models to extract text from video frames. "
+            "Processes TimeFrame annotations to perform OCR on frames containing text. "
+            "Supports multiple backends: MLX (Apple Silicon), HuggingFace, Ollama, and vLLM."
         ),
         app_license="Apache 2.0",
         identifier="vlm-ocr",
         url="https://github.com/clamsproject/app-vlm-ocr",
-        analyzer_version="various",  # depends on the selected HF model
+        analyzer_version="various",  # depends on the selected model
         analyzer_license="various",
     )
 
@@ -40,8 +50,7 @@ def appmetadata() -> AppMetadata:
     in_tf.add_description(
         'The labeled TimeFrame annotation that represents the video segment to be processed. When '
         '`representatives` property is present, the app will process still frames referred to by the '
-        '`representatives` property. Otherwise, the app will process the middle frame of the video segment. '
-        'Generic TimeFrames with no `label` property will not be processed.'
+        '`representatives` property. Otherwise, the app will process the middle frame of the video segment.'
     )
 
     # Outputs: only TextDocument and Alignment
@@ -56,6 +65,18 @@ def appmetadata() -> AppMetadata:
 
     # Parameters
     metadata.add_parameter(
+        name='hfModel',
+        default=DEFAULT_MODEL,
+        type='string',
+        multivalued=False,
+        description=(
+            f'Model ID with optional backend prefix. Format: "backend:model_id" or just "model_id". '
+            f'Backends: mlx (Apple Silicon), hf (HuggingFace), ollama, vllm. '
+            f'Tested models: {", ".join(TESTED_MODELS)}. '
+            f'Default: {DEFAULT_MODEL}'
+        )
+    )
+    metadata.add_parameter(
         name='tfLabel',
         default=[],
         type='string',
@@ -63,33 +84,63 @@ def appmetadata() -> AppMetadata:
         description='Labels of TimeFrame annotations to process. Default ([]): process all labeled TimeFrames.'
     )
     metadata.add_parameter(
-        name='hfModel',
-        default='microsoft/trocr-base-printed',
-        type='string',
-        multivalued=False,
+        name='allTargets',
+        type='boolean',
+        default=False,
         description=(
-            'Hugging Face model id to use with an image-to-text pipeline. '
-            'Examples: microsoft/trocr-base-printed, microsoft/trocr-large-printed, nougat, etc.'
+            'If true, process ALL TimePoint targets within each TimeFrame instead of just the '
+            'representative frame. This can significantly increase processing time but provides '
+            'OCR for every detected frame.'
         )
     )
-
     metadata.add_parameter(
-        name='frameInterval',
-        default=290,
-        type='integer',
-        multivalued=False,
-        description=(
-            'When no TimePoint/TimeFrame annotations are present in the MMIF, sample every N frames '
-            'from the input video. Default: 290.'
-        )
-    )
-
-    metadata.add_parameter(
-        name='prompt',
+        name='config',
         default='',
         type='string',
         multivalued=False,
-        description='Prompt text to guide OCR for models that support prompts (e.g., DeepSeek-OCR). Defaults to "Describe the image" for prompt-capable models if not provided. If a non-empty prompt is provided with a non-prompt model, the app will error.'
+        description=(
+            'Path to YAML config file (relative to app directory). '
+            'Config files can specify prompts and system prompts. '
+            'See config/default.yaml for example. Leave empty to use parameter defaults.'
+        )
+    )
+
+    # Prompt parameters
+    metadata.add_parameter(
+        name='defaultPrompt',
+        type='string',
+        default='Transcribe all text visible in this image.',
+        description=(
+            'Default user prompt for OCR. Config file can override this via default_prompt. '
+            'If set to `-`, any label not mapped in promptMap will be skipped.'
+        )
+    )
+    metadata.add_parameter(
+        name='promptMap',
+        type='map',
+        default=[],
+        description=(
+            'Mapping of TimeFrame labels to user prompts. Format: "LABEL:PROMPT". '
+            'To skip a label, set PROMPT to `-`. Config file can override via custom_prompts.'
+        )
+    )
+    metadata.add_parameter(
+        name='defaultSystemPrompt',
+        type='string',
+        default='',
+        description=(
+            'Default system prompt passed as a system message (role="system"). '
+            'Config file can override via default_system_prompt.'
+        )
+    )
+    metadata.add_parameter(
+        name='systemPromptMap',
+        type='map',
+        default=[],
+        description=(
+            'Mapping of TimeFrame labels to system prompts. Format: "LABEL:SYSTEM_PROMPT". '
+            'Config file can override via custom_system_prompts.'
+        )
     )
 
     return metadata

@@ -2,51 +2,29 @@
 VLM OCR App
 
 A CLAMS app that uses vision-language models for OCR on video frames.
-Supports multiple VLM backends including Qwen2-VL and others.
-Optional DSPy integration for optimized prompts.
+Supports multiple backends: HuggingFace, MLX, Ollama, vLLM. # note llm utils will be moved to clams_python
 """
 
 import argparse
 import logging
 import yaml
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, List, Dict, Any
 
-import torch
-from PIL import Image
-from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+import tqdm
 
 from clams import ClamsApp, Restifier
 from mmif import Mmif, View, Document, AnnotationTypes, DocumentTypes
 from mmif.utils import video_document_helper as vdh
 
-# Import DSPy integration (optional)
-try:
-    import dspy as dspy_lib
-    from dspy_clams import DSPyHFVLM, OCRModule, ArtifactLoader
-    DSPY_AVAILABLE = True
-except ImportError:
-    DSPY_AVAILABLE = False
-    dspy_lib = None
-
-
-# Tested models list
-TESTED_MODELS = [
-    "Qwen/Qwen2-VL-2B-Instruct",
-    "Qwen/Qwen2-VL-7B-Instruct",
-    # Add dots.ocr when tested
-]
+from llm_utils import LocalVLMClient, GenerationParams
 
 
 class VlmOcr(ClamsApp):
 
     def __init__(self):
         super().__init__()
-        self.model = None
-        self.processor = None
-        self.current_model_id = None
-        self._dspy_module_cache = {}
-        self._dspy_lm_cache = {}
+        self.llm = LocalVLMClient()
 
     def _appmetadata(self):
         # Using metadata.py
@@ -81,268 +59,56 @@ class VlmOcr(ClamsApp):
             return parameters['defaultSystemPrompt']
         return ""
 
-    def get_combined_prompt(self, label: str, parameters: dict) -> str:
-        """Get combined system and user prompt for a given label."""
-        system_prompt = self.get_system_prompt(label, parameters)
-        user_prompt = self.get_prompt(label, parameters)
-
-        if system_prompt and user_prompt:
-            return f"{system_prompt}\n\n{user_prompt}"
-        elif system_prompt:
-            return system_prompt
-        elif user_prompt:
-            return user_prompt
-        else:
-            return ""
-
-    def _load_model(self, model_id: str):
-        """Load a VLM model and processor."""
-        if self.current_model_id == model_id:
-            self.logger.info(f"Model {model_id} already loaded")
-            return
-
-        self.logger.info(f"Loading model: {model_id}")
-        self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-
-        # Load the appropriate model class based on model type
-        if "qwen" in model_id.lower() and "vl" in model_id.lower():
-            # Qwen2-VL and Qwen3-VL use the same model class
-            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-                model_id,
-                trust_remote_code=True,
-                torch_dtype=torch.bfloat16
-            )
-        else:
-            # Fallback to AutoModel for other VLMs
-            from transformers import AutoModelForVision2Seq
-            self.model = AutoModelForVision2Seq.from_pretrained(
-                model_id,
-                trust_remote_code=True,
-                torch_dtype=torch.bfloat16
-            )
-
-        self.model.eval()
-        self.current_model_id = model_id
-        self.logger.info(f"Model {model_id} loaded successfully")
-
-    def _run_ocr_basic(self, image: Image.Image, prompt: str, system_prompt: str = "") -> str:
-        """Run OCR using direct model inference.
-
-        Args:
-            image: PIL Image to process
-            prompt: User prompt (combined system+user if system_prompt not provided separately)
-            system_prompt: Optional system prompt to prepend as separate message
-        """
-        # Check if this is a Qwen VL model (requires chat message format)
-        is_qwen_vl = "qwen" in self.current_model_id.lower() and "vl" in self.current_model_id.lower()
-
-        if is_qwen_vl:
-            # Qwen VL models require chat message format with vision tokens
-            # Save image to temp file for processing
-            import tempfile
-            import os
-
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tf:
-                image.save(tf.name, format='JPEG')
-                temp_image_path = tf.name
-
-            try:
-                # Build messages array
-                messages = []
-
-                # Add system message if provided (content is just a string for system messages)
-                if system_prompt:
-                    messages.append({
-                        "role": "system",
-                        "content": system_prompt
-                    })
-
-                # Add user message with image and text
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": f"file://{temp_image_path}"},
-                        {"type": "text", "text": prompt}
-                    ]
-                })
-
-                # Apply chat template
-                text_input = self.processor.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True
-                )
-
-                # Process with image
-                inputs = self.processor(
-                    text=[text_input],
-                    images=[image],
-                    return_tensors="pt"
-                )
-
-                # Generate text
-                with torch.no_grad():
-                    generated_ids = self.model.generate(**inputs, max_new_tokens=500)
-
-                # Trim input tokens from output
-                generated_ids_trimmed = [
-                    out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-                ]
-
-                # Decode the output
-                generated_text = self.processor.batch_decode(
-                    generated_ids_trimmed,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False
-                )[0].strip()
-
-            finally:
-                # Clean up temp file
-                try:
-                    os.unlink(temp_image_path)
-                except:
-                    pass
-        else:
-            # Standard VLM processing (non-Qwen models)
-            inputs = self.processor(images=image, text=prompt, return_tensors="pt")
-
-            # Generate text
-            with torch.no_grad():
-                generated_ids = self.model.generate(**inputs, max_new_tokens=500)
-
-            # Decode the output
-            generated_text = self.processor.batch_decode(
-                generated_ids,
-                skip_special_tokens=True
-            )[0].strip()
-
-        return generated_text
-
-    def _run_ocr_with_dspy(self, image: Image.Image, dspy_module: 'OCRModule') -> str:
-        """Run OCR using a DSPy-optimized module."""
-        import tempfile
-        import os
-
-        # Save image to temp file for DSPy
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tf:
-            image.save(tf.name, format='JPEG')
-            dspy_image = dspy_lib.Image(path=tf.name)
-
-            try:
-                prediction = dspy_module(image=dspy_image)
-
-                # Extract text based on prediction structure
-                if hasattr(prediction, 'transcription'):
-                    text = prediction.transcription
-                elif hasattr(prediction, 'result'):
-                    text = prediction.result
-                else:
-                    text = str(prediction)
-
-                return text.strip()
-            finally:
-                try:
-                    os.unlink(tf.name)
-                except:
-                    pass
-
-    def _load_dspy_module(self, model_id: str, artifact_path: Optional[str] = None) -> Optional['OCRModule']:
-        """Load a DSPy artifact for optimized prompts."""
-        if not DSPY_AVAILABLE:
-            self.logger.warning("DSPy not available")
-            return None
-
-        cache_key = f"{model_id}_{artifact_path}"
-        if cache_key in self._dspy_module_cache:
-            return self._dspy_module_cache[cache_key]
-
-        artifacts_dir = Path(__file__).parent / "artifacts"
-        loader = ArtifactLoader(artifacts_dir=artifacts_dir)
-
-        try:
-            if artifact_path:
-                artifact_file = Path(artifact_path)
-                if not artifact_file.is_absolute():
-                    artifact_file = artifacts_dir / artifact_file
-            else:
-                # Auto-discover artifact
-                artifact_file = loader.find_artifact(model_id)
-
-            if not artifact_file or not artifact_file.exists():
-                self.logger.info(f"No DSPy artifact found for {model_id}")
-                return None
-
-            self.logger.info(f"Loading DSPy artifact: {artifact_file}")
-            module = loader.load_artifact(artifact_file)
-
-            # Configure DSPy with this model
-            dspy_lm = DSPyHFVLM(model_id=model_id)
-            dspy_lib.settings.configure(lm=dspy_lm)
-
-            self._dspy_module_cache[cache_key] = module
-            return module
-
-        except Exception as e:
-            self.logger.error(f"Failed to load DSPy module: {e}")
-            return None
+    def get_prompts(self, label: str, parameters: dict) -> Tuple[str, str]:
+        """Get system and user prompts separately for a given label."""
+        system_prompt = self.get_system_prompt(label, parameters) or ""
+        user_prompt = self.get_prompt(label, parameters) or ""
+        return system_prompt, user_prompt
 
     def _annotate(self, mmif: Mmif, **parameters) -> Mmif:
         self.logger.debug(f"Annotating with parameters: {parameters}")
 
-        # Load config file if specified
-        config_file = parameters.get('config')
-        self.logger.debug(f"config_file: {config_file}")
-        if config_file:
-            config_dir = Path(__file__).parent
-            config_file_path = config_dir / config_file
-            config = self.load_config(config_file_path)
-
-            # Config overrides parameters
-            if 'default_prompt' in config:
-                parameters['defaultPrompt'] = config['default_prompt']
-            if 'custom_prompts' in config:
-                prompt_map = []
-                for label, prompt in config['custom_prompts'].items():
-                    prompt_map.append(f"{label}:{prompt}")
-                parameters['promptMap'] = prompt_map
-            if 'default_system_prompt' in config:
-                parameters['defaultSystemPrompt'] = config['default_system_prompt']
-            if 'custom_system_prompts' in config:
-                system_prompt_map = []
-                for label, prompt in config['custom_system_prompts'].items():
-                    system_prompt_map.append(f"{label}:{prompt}")
-                parameters['systemPromptMap'] = system_prompt_map
-        else:
-            config = {}
-
         # Extract parameters (handle both CLI and web app formats)
-        def get_param(key, default):
+        def get_param(key, default=None):
             val = parameters.get(key, default)
-            # CLI passes direct values, web app passes lists
             if isinstance(val, list):
                 return val[0] if val else default
             return val
 
-        model_id = get_param("hfModel", "Qwen/Qwen2-VL-2B-Instruct")
-        use_dspy = get_param("useDSPy", False)
-        dspy_artifact = get_param("dspyArtifact", "")
+        # Load config file if specified
+        config_file = get_param('config')
+        if config_file:
+            config_dir = Path(__file__).parent
+            config_file_path = config_dir / config_file
+            if config_file_path.exists():
+                config = self.load_config(config_file_path)
+                if 'default_prompt' in config:
+                    parameters['defaultPrompt'] = config['default_prompt']
+                if 'custom_prompts' in config:
+                    prompt_map = []
+                    for label, prompt in config['custom_prompts'].items():
+                        prompt_map.append(f"{label}:{prompt}")
+                    parameters['promptMap'] = prompt_map
+                if 'default_system_prompt' in config:
+                    parameters['defaultSystemPrompt'] = config['default_system_prompt']
+                if 'custom_system_prompts' in config:
+                    system_prompt_map = []
+                    for label, prompt in config['custom_system_prompts'].items():
+                        system_prompt_map.append(f"{label}:{prompt}")
+                    parameters['systemPromptMap'] = system_prompt_map
 
-        # tfLabel can be multivalued
+        # Get model from parameters (default comes from metadata.py)
+        model_id = get_param("hfModel")
+        
+        # allTargets parameter - process all targets in TimeFrames instead of just representative
+        all_targets = get_param("allTargets", False)
+        if isinstance(all_targets, str):
+            all_targets = all_targets.lower() in ('true', '1', 'yes')
+
+        # tfLabel can be multivalued - filter TimeFrames by label
         tf_labels = parameters.get("tfLabel", [])
         if not isinstance(tf_labels, list):
-            tf_labels = [tf_labels]
-
-        # Load model
-        self._load_model(model_id)
-
-        # Load DSPy module if requested
-        dspy_module = None
-        if use_dspy:
-            dspy_module = self._load_dspy_module(model_id, artifact_path=dspy_artifact)
-            if dspy_module:
-                self.logger.info("Using DSPy-optimized prompts")
-            else:
-                self.logger.warning("DSPy module not loaded, using basic prompts")
+            tf_labels = [tf_labels] if tf_labels else []
 
         # Create new view
         new_view: View = mmif.new_view()
@@ -353,75 +119,154 @@ class VlmOcr(ClamsApp):
         # Get video document
         video_doc: Document = mmif.get_documents_by_type(DocumentTypes.VideoDocument)[0]
 
-        # Find TimeFrame annotations from upstream app (e.g., swt-detection)
+        # Find ALL TimeFrame annotations from any view
+        all_views = mmif.get_all_views_contain(AnnotationTypes.TimeFrame)
         timeframes = []
-        for view in mmif.get_all_views_contain(AnnotationTypes.TimeFrame):
+        
+        for view in all_views:
             for tf in view.get_annotations(AnnotationTypes.TimeFrame):
                 # Filter by label if specified
-                if tf_labels and tf.get("label") not in tf_labels:
+                label = tf.get_property('label')
+                if tf_labels and label not in tf_labels:
                     continue
-
-                # Ensure timeUnit is set (default to milliseconds if missing)
-                if not tf.get("timeUnit"):
-                    tf.add_property("timeUnit", "milliseconds")
-                    self.logger.debug(f"Added default timeUnit=milliseconds to {tf.id}")
-
+                # Ensure timeUnit is set
+                tf.add_property('timeUnit', 'milliseconds')
                 timeframes.append(tf)
 
         if not timeframes:
             self.logger.warning("No TimeFrame annotations found")
             return mmif
 
-        self.logger.info(f"Processing {len(timeframes)} timeframes")
+        self.logger.info(f"Found {len(timeframes)} timeframes to process")
 
-        # Process each timeframe
-        for i, timeframe in enumerate(timeframes, 1):
+        # Build task list
+        tasks: List[Dict[str, Any]] = []
+        frames_to_extract: List[int] = []
+        
+        # Cache for view lookups
+        view_cache = {}
+        
+        def get_target_framenum(target_id: str) -> Optional[int]:
+            """Resolve target ID to frame number."""
+            vid = target_id.split(':')[0]
+            if vid not in view_cache:
+                try:
+                    view_cache[vid] = mmif.get_view_by_id(vid)
+                except:
+                    self.logger.warning(f"Could not find view for target {target_id}")
+                    return None
+            
+            view = view_cache[vid]
+            if not view:
+                return None
+            
             try:
-                self.logger.info(f"Processing timeframe {i}/{len(timeframes)}: {timeframe.id}")
+                ann = view.annotations.get(target_id)
+                if not ann:
+                    return None
+                if ann.at_type == AnnotationTypes.TimePoint:
+                    ms = vdh.convert_timepoint(mmif, ann, 'milliseconds')
+                    return vdh.millisecond_to_framenum(video_doc, ms)
+                return None
+            except Exception as e:
+                self.logger.error(f"Error resolving target {target_id}: {e}")
+                return None
 
-                # Extract representative frame
-                frame_image = vdh.extract_representative_frame(
-                    mmif, timeframe, as_PIL=True, first_only=True
-                )
+        for timeframe in timeframes:
+            label = timeframe.get_property('label') or 'default'
+            prompt = self.get_prompts(label, parameters)
+            
+            if all_targets:
+                # Process all targets within the TimeFrame
+                targets = timeframe.get_property('targets')
+                if targets:
+                    for target_id in targets:
+                        framenum = get_target_framenum(target_id)
+                        if framenum is not None:
+                            tasks.append({
+                                'prompt': prompt,
+                                'source': target_id,
+                                'origin': timeframe.long_id,
+                                'label': label,
+                            })
+                            frames_to_extract.append(framenum)
+            else:
+                # Just use representative frame
+                framenum = vdh.get_representative_framenum(mmif, timeframe)
+                tasks.append({
+                    'prompt': prompt,
+                    'source': timeframe.long_id,
+                    'origin': timeframe.long_id,
+                    'label': label,
+                })
+                frames_to_extract.append(framenum)
 
-                # Get prompt based on timeframe label
-                label = timeframe.get("label", "default")
-                system_prompt = self.get_system_prompt(label, parameters)
-                user_prompt = self.get_prompt(label, parameters)
+        if not tasks:
+            self.logger.info("No tasks generated from timeframes.")
+            return mmif
 
-                self.logger.info(f"Using system prompt: {system_prompt[:100] if system_prompt else 'None'}...")
-                self.logger.info(f"Using user prompt: {user_prompt[:100]}...")
+        self.logger.info(f"Generated {len(tasks)} tasks, extracting {len(frames_to_extract)} frames")
 
-                # Run OCR
-                if dspy_module:
-                    text = self._run_ocr_with_dspy(frame_image, dspy_module)
-                else:
-                    text = self._run_ocr_basic(frame_image, user_prompt, system_prompt)
+        # Extract all frames at once
+        self.logger.info("Extracting frames from video...")
+        start_extract = time.time()
+        all_images = vdh.extract_frames_as_images(video_doc, frames_to_extract, as_PIL=True)
+        extract_time = time.time() - start_extract
+        self.logger.info(f"Extracted {len(all_images)} frames in {extract_time:.2f}s")
 
-                if not text:
-                    self.logger.warning(f"No text extracted from {timeframe.id}")
+        # Process each task
+        self.logger.info(f"Processing {len(tasks)} frames with model {model_id}...")
+        start_process = time.time()
+        processed = 0
+        
+        for i, (task, image) in enumerate(tqdm.tqdm(zip(tasks, all_images), total=len(tasks))):
+            try:
+                system_prompt, user_prompt = task['prompt']
+                
+                # Skip if prompt is "-"
+                if (user_prompt or "").strip() == "-":
                     continue
 
-                self.logger.info(f"Extracted text: {text[:100]}{'...' if len(text) > 100 else ''}")
+                # Run OCR
+                text = self.llm.generate(
+                    model=str(model_id),
+                    image=image,
+                    user_prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    params=GenerationParams(max_new_tokens=500),
+                )
+
+                if not text:
+                    continue
 
                 # Create text document
-                text_document = new_view.new_textdocument(text=text)
+                text_document = new_view.new_textdocument(
+                    text=text,
+                    document=video_doc.id,
+                    origin=task['origin'],
+                    provenance='derived',
+                )
 
                 # Create alignment
-                source_id = timeframe.get("representatives", [timeframe.id])[0]
                 alignment = new_view.new_annotation(AnnotationTypes.Alignment)
-                alignment.add_property("source", source_id)
+                alignment.add_property("source", task['source'])
                 alignment.add_property("target", text_document.long_id)
-
-                self.logger.info(f"Created text document {text_document.id} aligned to {source_id}")
-
-                # DEBUG: Break after first timeframe for testing
-                self.logger.info("DEBUG: Breaking after first timeframe for testing")
-                break
+                
+                processed += 1
 
             except Exception as e:
-                self.logger.error(f"Error processing {timeframe.id}: {e}")
+                self.logger.error(f"Error processing task {i}: {e}")
                 continue
+
+        process_time = time.time() - start_process
+        total_time = extract_time + process_time
+        fps = len(tasks) / process_time if process_time > 0 else 0
+        
+        self.logger.info(f"Processed {processed}/{len(tasks)} frames")
+        self.logger.info(f"Frame extraction: {extract_time:.2f}s")
+        self.logger.info(f"OCR processing: {process_time:.2f}s")
+        self.logger.info(f"Total time: {total_time:.2f}s")
+        self.logger.info(f"Processing rate: {fps:.2f} frames/sec")
 
         return mmif
 
