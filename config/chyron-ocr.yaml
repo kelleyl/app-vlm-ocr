@@ -1,0 +1,47 @@
+# Chyron OCR Configuration
+#
+# This config is designed for transcribing lower-third/chyron text from video frames.
+# Adapted from app-smolvlm2-captioner/config/owen39-cl1.yaml
+#
+# Usage with dots-ocr model (requires GPU):
+#   python cli.py \
+#     --config config/chyron-ocr.yaml \
+#     --hfModel NielsRogge/dots.llm.7b \
+#     --tfLabel Chyron \
+#     input.mmif output.mmif
+#
+# Usage with Qwen2-VL-2B (works on CPU):
+#   python cli.py \
+#     --config config/chyron-ocr.yaml \
+#     --hfModel Qwen/Qwen2-VL-2B-Instruct \
+#     --tfLabel Chyron \
+#     input.mmif output.mmif
+#
+# Note:
+#   - dots-ocr (NielsRogge/dots.llm.7b) is OCR-specialized and requires CUDA GPU
+#   - Use --tfLabel to filter which TimeFrame labels to process
+#   - Use --allTargets to process all targets within TimeFrames (not just representative)
+
+# Default prompts (used when no label-specific prompt matches)
+default_prompt: |
+  Transcribe all text visible in this image.
+
+default_system_prompt: |
+  You are an expert OCR system that extracts text from video frames.
+
+# Label-specific prompts for Chyron
+custom_prompts:
+  Chyron: |
+    Transcribe the text in the *lower third* or *chyron* area of the screen.
+    Represent line breaks in the on-screen text as \n in your output.
+    Ignore any incidental text in the background.
+    If you find no text, respond with the single word 'NONE' and nothing else.
+
+# Label-specific system prompts for Chyron
+custom_system_prompts:
+  Chyron: |
+    You are analyzing a single still image from a television program.
+    Your only role is to precisely transcribe the on-screen text.
+    Pay close attention to the exact spelling of words as they appear on the screen.
+    Include every letter, number, and punctuation, as instructed by the user.
+    Do not give any introduction or explanation.
