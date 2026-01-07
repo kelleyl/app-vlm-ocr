@@ -6,7 +6,7 @@ A CLAMS app that performs **OCR on video frames** using vision-language models (
 
 This app applies configurable vision-language models to extract text from video frames. It:
 
-- Processes `TimeFrame` annotations from upstream apps (e.g., `swt-detection`)
+- Processes `TimeFrame` annotations from upstream apps
 - Extracts representative frames or all target frames from each TimeFrame
 - Runs OCR using local VLMs via multiple backends
 - Outputs `TextDocument` annotations aligned to the source TimeFrames/TimePoints
@@ -26,24 +26,13 @@ The app supports multiple VLM backends via a LiteLLM-style interface:
 
 | Model | Backend | GPU Required | Status | Notes |
 |-------|---------|--------------|--------|-------|
-| `mlx-community/Qwen2-VL-2B-Instruct-4bit` | MLX | No | ✅ Verified | **Recommended for Apple Silicon** |
-| `Qwen/Qwen2-VL-2B-Instruct` | HuggingFace | No | ✅ Verified | Default model, works on CPU/GPU |
+| `mlx-community/Qwen2-VL-2B-Instruct-4bit` | MLX | No | ✅ Verified | **Default** - Recommended for Apple Silicon |
+| `Qwen/Qwen2-VL-2B-Instruct` | HuggingFace | No | ✅ Verified | Works on CPU/GPU |
 | `Qwen/Qwen2-VL-7B-Instruct` | HuggingFace | No | ✅ Verified | Higher quality, more memory |
 | `llama3.2-vision` | Ollama | No | ✅ Verified | Requires Ollama server |
-| `Qwen/Qwen2-VL-2B-Instruct` | vLLM | Yes | ⚠️ Experimental | May have image processing issueson |
-
-## Performance Benchmarks
-
-Tested on Apple Silicon (M-series Mac) with MLX backend:
-
-| Scenario | Frames | Time | Rate |
-|----------|--------|------|------|
-| All targets (Bars, Slate, Chyron, Neg) | 127 | 4m 29s | **0.48 fps** |
-| Slate + Chyron only | 31 | 1m 21s | **0.38 fps** |
-
-- **~2 seconds per frame** average processing time
-- OCR quality is excellent on text-containing frames (Slate, Chyron)
-- Use `--tfLabel` to filter frame types and improve efficiency
+| `NielsRogge/dots.llm.7b` | HuggingFace | Yes | 🔬 Untested | OCR-specialized |
+| `echo840/Monkey-Chat` | HuggingFace | Yes | 🔬 Untested | Monkey OCR |
+| `deepseek-ai/deepseek-vl2-small` | HuggingFace | Yes | 🔬 Untested | DeepSeek VL2 |
 
 ## Installation
 
@@ -68,7 +57,6 @@ pip install -r requirements.txt
 
 **MLX (Apple Silicon - Recommended for Mac)**:
 ```bash
-# In a separate terminal/environment with mlx-vlm installed
 pip install mlx-vlm
 python -m mlx_vlm.server  # Runs on port 8080
 ```
@@ -84,26 +72,23 @@ ollama pull llama3.2-vision
 ### CLI Usage
 
 ```bash
-# Use MLX backend (Apple Silicon - recommended)
-python cli.py --hfModel "mlx:mlx-community/Qwen2-VL-2B-Instruct-4bit" input.mmif output.mmif
+# Default: MLX backend (Apple Silicon)
+python cli.py input.mmif output.mmif
 
-# Process ALL targets within TimeFrames (not just representative frames)
-python cli.py --hfModel "mlx:mlx-community/Qwen2-VL-2B-Instruct-4bit" \
-  --allTargets true input.mmif output.mmif
+# Use HuggingFace backend
+python cli.py --hfModel "hf:Qwen/Qwen2-VL-2B-Instruct" input.mmif output.mmif
 
-# Filter by TimeFrame labels (recommended for efficiency)
-python cli.py --hfModel "mlx:mlx-community/Qwen2-VL-2B-Instruct-4bit" \
-  --tfLabel Slate --tfLabel Chyron \
-  --allTargets true input.mmif output.mmif
+# Filter by TimeFrame labels
+python cli.py --tfLabel Slate --tfLabel Chyron input.mmif output.mmif
 
-# Use HuggingFace backend (default, no server needed)
-python cli.py --hfModel "Qwen/Qwen2-VL-2B-Instruct" input.mmif output.mmif
+# Process ALL targets within TimeFrames (not just representative)
+python cli.py --allTargets true input.mmif output.mmif
+
+# Use custom prompts via config file
+python cli.py --config config/default.yaml input.mmif output.mmif
 
 # Use Ollama backend
 python cli.py --hfModel "ollama:llama3.2-vision" input.mmif output.mmif
-
-# Use a custom config file for prompts
-python cli.py --config "config/default.yaml" input.mmif output.mmif
 ```
 
 ### HTTP Server
@@ -121,72 +106,241 @@ Then POST MMIF to `http://localhost:5000/`:
 ```bash
 curl -X POST -H "Content-Type: application/json" \
   -d @input.mmif \
-  "http://localhost:5000/?hfModel=mlx:mlx-community/Qwen2-VL-2B-Instruct-4bit&allTargets=true"
+  "http://localhost:5000/?allTargets=true&tfLabel=Slate"
 ```
 
-### Example Output
+### Batch Processing
 
-Given a video with a slate frame, the app produces:
+For processing multiple files with multiple models:
 
+```bash
+# Run default OCR models over all MMIF files
+python batch_ocr.py ./mmif_input ./ocr_output
+
+# Run specific models
+python batch_ocr.py ./input ./output --models "hf:Qwen/Qwen2-VL-2B-Instruct"
+
+# Filter by labels
+python batch_ocr.py ./input ./output --tf-labels Slate Chyron
 ```
-STATELINE
-Number: 703
-Air Dates: 10/15/86 19:30
-Repeat: 10/19/86 12:30
-Producer: Hatch
-Director: Sheehan
-TH 2389
+
+Output structure:
+```
+output/
+├── dots-ocr/
+│   └── *.json
+├── monkey-ocr/
+│   └── *.json
+├── deepseek-ocr/
+│   └── *.json
+└── batch_summary.json  # Timing and results
 ```
 
-## Configuration
+---
 
-### Config Files
+## Prompt System
 
-Config files (YAML) specify prompts for different TimeFrame labels:
+The app uses a flexible prompt system with three layers of configuration:
+
+### 1. Parameter Defaults (metadata.py)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `defaultPrompt` | `"Transcribe all text visible in this image."` | User prompt sent to model |
+| `defaultSystemPrompt` | `""` (empty) | System prompt (role="system") |
+| `promptMap` | `[]` | Label-specific user prompts |
+| `systemPromptMap` | `[]` | Label-specific system prompts |
+
+### 2. Config File Override (YAML)
+
+Config files can override defaults:
 
 ```yaml
 # config/default.yaml
 default_prompt: |
   Transcribe all text visible in this image.
 
+default_system_prompt: |
+  You are an expert OCR system.
+
 custom_prompts:
   Slate: |
-    This is a slate frame. Please transcribe all visible text including:
-    - Title of the program
-    - Date of recording
-    - Any identifiers or codes
-    
+    This is a slate frame. Extract title, date, and identifiers.
   Chyron: |
-    This is a chyron (lower third). Transcribe the text exactly as shown.
+    This is a chyron. Transcribe the text exactly.
+
+custom_system_prompts:
+  Slate: |
+    Focus on structured information extraction.
 ```
 
-### Parameters
+### 3. CLI/API Parameter Override
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `hfModel` | `Qwen/Qwen2-VL-2B-Instruct` | Model ID with optional backend prefix (`mlx:`, `ollama:`, `vllm:`) |
-| `allTargets` | `false` | Process ALL TimePoint targets within each TimeFrame |
-| `tfLabel` | `[]` (all) | TimeFrame labels to process (e.g., `Slate`, `Chyron`) |
-| `config` | `config/default.yaml` | Path to YAML config file |
-| `defaultPrompt` | (see metadata) | Default OCR prompt |
-| `promptMap` | `[]` | Label-specific prompts (`LABEL:PROMPT`) |
-| `defaultSystemPrompt` | `""` | System prompt for the model |
-| `systemPromptMap` | `[]` | Label-specific system prompts |
+Parameters passed via CLI or API override config file settings:
 
-## Input/Output
+```bash
+python cli.py \
+  --defaultPrompt "Extract all visible text" \
+  --promptMap "Slate:Extract slate info" \
+  --promptMap "Chyron:Transcribe chyron text" \
+  input.mmif output.mmif
+```
 
-### Input Requirements
+### Prompt Flow
 
-- `VideoDocument` with a valid video file
-- `TimeFrame` annotations (e.g., from `swt-detection`) with:
+```
+┌─────────────────┐
+│  metadata.py    │  ← Default values
+│  (defaults)     │
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│  config.yaml    │  ← Config file overrides (if --config specified)
+│  (optional)     │
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│  CLI/API params │  ← Runtime parameters override all
+│  (runtime)      │
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│  get_prompts()  │  ← Resolves (system_prompt, user_prompt) for label
+└────────┬────────┘
+         ↓
+┌─────────────────┐
+│  llm_utils.py   │  ← Sends to VLM backend
+│  generate()     │
+└─────────────────┘
+```
+
+### Skipping Labels
+
+Set prompt to `-` to skip processing for a label:
+
+```bash
+# Skip "Bars" label, process others
+python cli.py --promptMap "Bars:-" input.mmif output.mmif
+```
+
+---
+
+## MMIF Output Structure
+
+The app produces two annotation types:
+
+### TextDocument
+
+Contains the OCR result text:
+
+```json
+{
+  "@type": "http://mmif.clams.ai/vocabulary/TextDocument/v1",
+  "properties": {
+    "id": "td1",
+    "text": {
+      "@value": "STATELINE\nNumber: 703\nAir Dates: 10/15/86"
+    },
+    "document": "m1",
+    "origin": "v2:tf5",
+    "provenance": "derived"
+  }
+}
+```
+
+| Property | Description |
+|----------|-------------|
+| `text.@value` | The extracted OCR text |
+| `document` | Reference to source VideoDocument |
+| `origin` | Reference to source TimeFrame |
+| `provenance` | Always `"derived"` |
+
+### Alignment
+
+Links source frame to OCR result:
+
+```json
+{
+  "@type": "http://mmif.clams.ai/vocabulary/Alignment/v1",
+  "properties": {
+    "id": "a1",
+    "source": "v2:tf5",
+    "target": "v3:td1"
+  }
+}
+```
+
+| Property | Description |
+|----------|-------------|
+| `source` | TimeFrame or TimePoint ID that was processed |
+| `target` | TextDocument ID containing OCR result |
+
+### allTargets Mode
+
+When `allTargets=true`, each TimePoint within a TimeFrame gets its own TextDocument and Alignment:
+
+```
+TimeFrame (tf5)
+├── TimePoint (tp10) → TextDocument (td1) + Alignment (a1)
+├── TimePoint (tp11) → TextDocument (td2) + Alignment (a2)
+└── TimePoint (tp12) → TextDocument (td3) + Alignment (a3)
+```
+
+When `allTargets=false` (default), only the representative frame is processed:
+
+```
+TimeFrame (tf5) → TextDocument (td1) + Alignment (a1)
+```
+
+---
+
+## Parameters Reference
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `hfModel` | string | `mlx:mlx-community/Qwen2-VL-2B-Instruct-4bit` | Model ID with backend prefix |
+| `tfLabel` | string[] | `[]` | TimeFrame labels to process (empty = all) |
+| `allTargets` | boolean | `false` | Process all targets vs representative only |
+| `config` | string | `""` | Path to YAML config file |
+| `defaultPrompt` | string | `"Transcribe all text..."` | Default OCR prompt |
+| `promptMap` | map | `[]` | Label → prompt mappings (`LABEL:PROMPT`) |
+| `defaultSystemPrompt` | string | `""` | Default system prompt |
+| `systemPromptMap` | map | `[]` | Label → system prompt mappings |
+
+---
+
+## Input/Output Requirements
+
+### Input
+
+- `VideoDocument` with a valid video file path
+- `TimeFrame` annotations with:
   - `start` and `end` times
-  - `label` property (e.g., "Slate", "Chyron", "Bars")
-  - `targets` property pointing to TimePoint annotations
+  - `label` property (e.g., "Slate", "Chyron")
+  - Optional `targets` property pointing to TimePoint annotations
 
 ### Output
 
-- `TextDocument` for each processed frame containing the OCR result
-- `Alignment` linking each TextDocument to its source TimeFrame or TimePoint
+- `TextDocument` for each processed frame
+- `Alignment` linking TextDocument to source
+
+---
+
+## Performance
+
+Tested on Apple Silicon (M-series Mac) with MLX backend:
+
+| Scenario | Frames | Time | Rate |
+|----------|--------|------|------|
+| All targets (127 frames) | 127 | 4m 29s | 0.48 fps |
+| Slate + Chyron only (31 frames) | 31 | 1m 21s | 0.38 fps |
+
+**Tips for efficiency:**
+- Use `--tfLabel` to filter frame types
+- Use MLX backend on Apple Silicon
+- Consider `allTargets=false` for faster processing
+
+---
 
 ## Docker/Podman
 
@@ -201,60 +355,67 @@ podman run -p 5000:5000 app-vlm-ocr
 podman run --gpus all -p 5000:5000 app-vlm-ocr
 ```
 
-## Development
+---
 
-### Project Structure
+## Project Structure
 
 ```
 app-vlm-ocr/
 ├── app.py              # Main CLAMS app
-├── metadata.py         # App metadata and parameters
+├── metadata.py         # App metadata and parameter definitions
 ├── cli.py              # CLI interface
-├── llm_utils.py        # Multi-backend VLM client (MLX, HuggingFace, Ollama, vLLM)
+├── llm_utils.py        # Multi-backend VLM client
+├── batch_ocr.py        # Batch processing script
 ├── config/
-│   └── default.yaml    # Default prompts config
+│   └── default.yaml    # Example prompts config
 ├── requirements.txt
-└── Containerfile
+├── Containerfile
+├── LICENSE
+└── README.md
 ```
+
+---
+
+## Development
 
 ### Adding New Models
 
-To add support for a new model:
+1. Add to `TESTED_MODELS` list in `llm_utils.py`:
 
-1. Add to `TESTED_MODELS` list in `llm_utils.py`
-2. Specify the backend and model_id
-3. Test with sample MMIF files
+```python
+TestedModel(
+    name="my-model",
+    backend=Backend.HUGGINGFACE,
+    model_id="organization/model-name",
+    requires_gpu=True,
+    notes="Description",
+),
+```
+
+2. Test with sample MMIF files
 
 ### Backend Architecture
 
-The `llm_utils.py` module provides a unified `LocalVLMClient` that routes requests to different backends:
+The `llm_utils.py` module provides a unified `LocalVLMClient`:
 
 ```python
-from llm_utils import LocalVLMClient
+from llm_utils import LocalVLMClient, GenerationParams
 
 client = LocalVLMClient()
 
-# MLX backend (Apple Silicon)
+# Generate with any backend
 result = client.generate(
     model="mlx:mlx-community/Qwen2-VL-2B-Instruct-4bit",
     image=pil_image,
     user_prompt="Transcribe text in this image.",
-)
-
-# HuggingFace backend
-result = client.generate(
-    model="Qwen/Qwen2-VL-2B-Instruct",  # hf: prefix optional
-    image=pil_image,
-    user_prompt="Transcribe text in this image.",
-)
-
-# Ollama backend
-result = client.generate(
-    model="ollama:llama3.2-vision",
-    image=pil_image,
-    user_prompt="Transcribe text in this image.",
+    system_prompt="You are an OCR expert.",
+    params=GenerationParams(max_new_tokens=500, temperature=0.0),
 )
 ```
+
+The client automatically routes to the correct backend based on the model prefix.
+
+---
 
 ## License
 

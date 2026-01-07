@@ -88,7 +88,7 @@ TESTED_MODELS: List[TestedModel] = [
         requires_gpu=True,
         notes="DeepSeek VL2 model, requires CUDA GPU",
     ),
-    # Ollama models (fully tested)
+    # Ollama models
     TestedModel(
         name="llama3.2-vision",
         backend=Backend.OLLAMA,
@@ -96,7 +96,7 @@ TESTED_MODELS: List[TestedModel] = [
         requires_gpu=False,
         notes="Ollama vision model, requires Ollama server running",
     ),
-    # MLX models (Apple Silicon - fully tested)
+    # MLX models (Apple Silicon)
     TestedModel(
         name="qwen2-vl-2b-mlx",
         backend=Backend.MLX,

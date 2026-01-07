@@ -1,0 +1,39 @@
+# VLM OCR Default Configuration
+# 
+# This file provides example prompts for different TimeFrame labels.
+# You can customize these for your specific use case.
+#
+# Usage:
+#   python cli.py --config config/default.yaml input.mmif output.mmif
+
+# Default prompt used when no label-specific prompt is defined
+default_prompt: |
+  Transcribe all text visible in this image.
+
+# Optional: Default system prompt (prepended to all requests)
+# System prompts are prepended to user prompts when both are present
+default_system_prompt: |
+  You are an expert OCR system that extracts text from video frames.
+
+# Label-specific prompts (override default_prompt for these labels)
+custom_prompts:
+  Slate: |
+    This is a slate frame from a video. Please transcribe all visible text, including:
+    - Title of the program
+    - Date of recording
+    - Any identifiers, codes, or numbers
+    - Name of production company or network
+    Output only the transcribed text.
+
+  Chyron: |
+    This is a chyron (lower third text overlay) from a video. 
+    Transcribe all visible text exactly as it appears.
+
+  Credits: |
+    These are credits from a video. Transcribe all visible text, 
+    including names, titles, and roles.
+
+# Optional: Label-specific system prompts (override default_system_prompt for these labels)
+custom_system_prompts:
+  Slate: |
+    You are an expert at analyzing broadcast slate frames. Focus on extracting structured information accurately.
