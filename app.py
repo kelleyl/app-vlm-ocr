@@ -110,6 +110,11 @@ class VlmOcr(ClamsApp):
         tf_labels = parameters.get("tfLabel", [])
         if not isinstance(tf_labels, list):
             tf_labels = [tf_labels] if tf_labels else []
+        # Case-insensitive label filtering
+        tf_labels = [l.lower() for l in tf_labels]
+
+        # appUri filtering (from metadata.py)
+        app_uri = get_param('appUri', '')
 
         # Create new view
         new_view: View = mmif.new_view()
@@ -118,24 +123,50 @@ class VlmOcr(ClamsApp):
         new_view.new_contain(AnnotationTypes.Alignment)
 
         # Get video document
-        video_doc: Document = mmif.get_documents_by_type(DocumentTypes.VideoDocument)[0]
+        video_docs = mmif.get_documents_by_type(DocumentTypes.VideoDocument)
+        if not video_docs:
+            self.logger.error("No VideoDocument found in MMIF")
+            return mmif
+        video_doc: Document = video_docs[0]
 
-        # Find ALL TimeFrame annotations from any view
+        # Find ALL TimeFrame annotations
+        # Using a more robust search that handles version mismatches better
         all_views = mmif.get_all_views_contain(AnnotationTypes.TimeFrame)
+        if not all_views:
+            # Fallback: check all views manually if get_all_views_contain failed
+            self.logger.debug("get_all_views_contain returned nothing, trying manual view search")
+            all_views = [view for view in mmif.views if any(str(ann.at_type).endswith('TimeFrame') for ann in view.annotations)]
+        
         timeframes = []
         
+        found_labels = set()
+        total_tf_found = 0
+        
         for view in all_views:
+            # Filter by appUri if specified
+            if app_uri and app_uri not in view.metadata.app:
+                continue
+                
             for tf in view.get_annotations(AnnotationTypes.TimeFrame):
+                total_tf_found += 1
                 # Filter by label if specified
                 label = tf.get_property('label')
-                if tf_labels and label not in tf_labels:
-                    continue
+                if label:
+                    found_labels.add(label)
+                    
+                if tf_labels:
+                    if not label or label.lower() not in tf_labels:
+                        continue
+                
                 # Ensure timeUnit is set
                 tf.add_property('timeUnit', 'milliseconds')
                 timeframes.append(tf)
 
         if not timeframes:
-            self.logger.warning("No TimeFrame annotations found")
+            self.logger.warning(f"No TimeFrame annotations found matching filters (appUri='{app_uri}', tfLabels={tf_labels})")
+            self.logger.info(f"Total timeframes in MMIF: {total_tf_found}")
+            if found_labels:
+                self.logger.info(f"Labels found in MMIF: {found_labels}")
             return mmif
 
         self.logger.info(f"Found {len(timeframes)} timeframes to process")

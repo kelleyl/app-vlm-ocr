@@ -56,7 +56,7 @@ def appmetadata() -> AppMetadata:
 
     # Inputs: a video and its TimeFrame(s) with optional representatives
     metadata.add_input(DocumentTypes.VideoDocument)
-    in_tf = metadata.add_input(AnnotationTypes.TimeFrame, representatives='?', label='*')
+    in_tf = metadata.add_input(AnnotationTypes.TimeFrame)
     in_tf.add_description(
         'The labeled TimeFrame annotation that represents the video segment to be processed. When '
         '`representatives` property is present, the app will process still frames referred to by the '
