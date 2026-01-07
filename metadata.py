@@ -87,11 +87,25 @@ def appmetadata() -> AppMetadata:
         )
     )
     metadata.add_parameter(
+        name='appUri',
+        default='',
+        type='string',
+        multivalued=False,
+        description=(
+            'URI of the app that produced TimeFrame annotations to use. '
+            'If empty, uses TimeFrames from any app. '
+            'Example: "http://apps.clams.ai/swt-detection/"'
+        )
+    )
+    metadata.add_parameter(
         name='tfLabel',
         default=[],
         type='string',
         multivalued=True,
-        description='Labels of TimeFrame annotations to process. Default ([]): process all labeled TimeFrames.'
+        description=(
+            'Labels of TimeFrame annotations to process (case-insensitive). '
+            'Default ([]): process all labeled TimeFrames.'
+        )
     )
     metadata.add_parameter(
         name='allTargets',

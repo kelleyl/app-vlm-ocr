@@ -31,7 +31,7 @@ default_system_prompt: |
 
 # Label-specific prompts for Chyron
 custom_prompts:
-  Chyron: |
+  chyron: |
     Transcribe the text in the *lower third* or *chyron* area of the screen.
     Represent line breaks in the on-screen text as \n in your output.
     Ignore any incidental text in the background.
@@ -39,7 +39,7 @@ custom_prompts:
 
 # Label-specific system prompts for Chyron
 custom_system_prompts:
-  Chyron: |
+  chyron: |
     You are analyzing a single still image from a television program.
     Your only role is to precisely transcribe the on-screen text.
     Pay close attention to the exact spelling of words as they appear on the screen.
