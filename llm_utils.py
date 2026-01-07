@@ -66,6 +66,28 @@ TESTED_MODELS: List[TestedModel] = [
         requires_gpu=False,
         notes="Higher quality, more memory required",
     ),
+    # OCR-specialized HuggingFace models (requires GPU)
+    TestedModel(
+        name="dots-ocr",
+        backend=Backend.HUGGINGFACE,
+        model_id="NielsRogge/dots.llm.7b",
+        requires_gpu=True,
+        notes="OCR-specialized model, requires CUDA GPU",
+    ),
+    TestedModel(
+        name="monkey-ocr",
+        backend=Backend.HUGGINGFACE,
+        model_id="echo840/Monkey-Chat",
+        requires_gpu=True,
+        notes="Monkey OCR model, requires CUDA GPU",
+    ),
+    TestedModel(
+        name="deepseek-ocr",
+        backend=Backend.HUGGINGFACE,
+        model_id="deepseek-ai/deepseek-vl2-small",
+        requires_gpu=True,
+        notes="DeepSeek VL2 model, requires CUDA GPU",
+    ),
     # Ollama models (fully tested)
     TestedModel(
         name="llama3.2-vision",
