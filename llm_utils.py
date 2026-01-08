@@ -21,6 +21,7 @@ Backends:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Dict, Any, List
@@ -173,6 +174,7 @@ class LocalVLMClient:
         self.ollama_host = ollama_host
         self.vllm_host = vllm_host
         self.mlx_host = mlx_host
+        self.logger = logging.getLogger(self.__class__.__name__)
 
         # Cache for loaded HuggingFace models
         self._hf_cache: Dict[str, Dict[str, Any]] = {}
