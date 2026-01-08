@@ -12,4 +12,5 @@ matplotlib
 torchvision
 accelerate
 PyYAML>=6.0
+qwen-vl-utils
 

@@ -336,24 +336,10 @@ class LocalVLMClient:
             messages.append({"role": "system", "content": system_prompt})
         
         # Check if the model is Qwen2-VL based (common for DOTS)
-        is_qwen2_vl = "qwen2_vl" in str(getattr(model.config, "model_type", "")).lower()
+        is_qwen2_vl = "qwen2" in str(getattr(model.config, "model_type", "")).lower() or "dots.ocr" in model_id.lower()
         
         if is_qwen2_vl:
-            # Qwen2-VL specifically handles image tokens in a certain way
-            messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image", 
-                        "image": image,
-                        # DOTS often works better with original resolution or high-res
-                        "resized_height": image.height,
-                        "resized_width": image.width,
-                    },
-                    {"type": "text", "text": user_prompt},
-                ],
-            })
-        else:
+            # DOTS (Qwen2-VL) specific message format
             messages.append({
                 "role": "user",
                 "content": [
@@ -361,36 +347,34 @@ class LocalVLMClient:
                     {"type": "text", "text": user_prompt},
                 ],
             })
-
-        # Apply chat template and process
-        text_input = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        
-        # Prepare inputs with special handling for potential Qwen2-VL processor issues
-        try:
-            inputs = processor(
-                text=[text_input], 
-                images=[image], 
-                return_tensors="pt", 
-                padding=True
-            )
-        except Exception as e:
-            if "Unrecognized video processor" in str(e):
-                # Fallback: manually prepare inputs if the processor is getting confused about video
-                print("Detected 'Unrecognized video processor' error. Attempting fallback input preparation...")
-                # Some models need images=None if they handle vision via different keys
+            
+            # Use qwen_vl_utils if available for high-quality processing (matches dots.ocr example)
+            try:
+                from qwen_vl_utils import process_vision_info
+                text_input = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                image_inputs, video_inputs = process_vision_info(messages)
                 inputs = processor(
                     text=[text_input],
+                    images=image_inputs,
+                    videos=video_inputs,
+                    padding=True,
                     return_tensors="pt",
-                    padding=True
                 )
-                # Manually add pixel values if they were missed
-                if "pixel_values" not in inputs:
-                    vision_inputs = processor(images=[image], return_tensors="pt")
-                    inputs.update(vision_inputs)
-            else:
-                raise e
+            except Exception as e:
+                self.logger.warning(f"Failed specialized Qwen2-VL processing, falling back: {e}")
+                text_input = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                inputs = processor(text=[text_input], images=[image], return_tensors="pt", padding=True)
+        else:
+            # Standard HuggingFace VLM logic
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_prompt},
+                ],
+            })
+            text_input = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = processor(text=[text_input], images=[image], return_tensors="pt", padding=True)
 
         # Move to device
         for k, v in inputs.items():
@@ -399,7 +383,12 @@ class LocalVLMClient:
 
         # Generate
         with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_new_tokens=params.max_new_tokens)
+            # For dots.ocr, document parsing needs significantly more tokens than standard OCR
+            max_tokens = params.max_new_tokens
+            if "dots.ocr" in model_id.lower() and max_tokens < 4096:
+                max_tokens = 4096 # DOTS can produce very long JSON for complex layouts
+                
+            generated_ids = model.generate(**inputs, max_new_tokens=max_tokens)
 
         # Trim input tokens from output
         input_len = inputs["input_ids"].shape[1]
