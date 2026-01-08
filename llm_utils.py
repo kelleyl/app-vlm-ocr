@@ -70,7 +70,7 @@ TESTED_MODELS: List[TestedModel] = [
     TestedModel(
         name="dots-ocr",
         backend=Backend.HUGGINGFACE,
-        model_id="NielsRogge/dots.llm.7b",
+        model_id="rednote-hilab/dots.ocr",
         requires_gpu=True,
         notes="OCR-specialized model, requires CUDA GPU",
     ),
@@ -236,14 +236,59 @@ class LocalVLMClient:
         if model_id in self._hf_cache:
             return self._hf_cache[model_id]
 
-        from transformers import AutoProcessor, AutoModelForImageTextToText
+        from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModel, AutoModelForCausalLM
+        import warnings
 
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        model = AutoModelForImageTextToText.from_pretrained(
-            model_id,
-            trust_remote_code=True,
-            dtype=self.torch_dtype,
-        )
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*preprocessor.json.*deprecated.*")
+            
+            # For dots.ocr and similar Qwen2-VL based models, AutoProcessor.from_pretrained 
+            # can be finicky. We try to load it normally first.
+            try:
+                processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+            except Exception as e:
+                # If we get "multiple values for chat_template", it's a known bug in 
+                # transformers factory when loading some custom processors.
+                if "chat_template" in str(e):
+                    self.logger.warning(f"Caught chat_template error, attempting workaround for {model_id}")
+                    # Workaround: Load without passing chat_template if it's already in the config
+                    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, chat_template=None)
+                else:
+                    raise e
+            
+            # Workaround for 'Unrecognized video processor' error in some transformers versions
+            # when video_preprocessor_config.json is missing (common in Qwen2-VL/dots-ocr)
+            # This is only needed if the model hasn't been patched locally.
+            if not hasattr(processor, "video_processor") or processor.video_processor is None:
+                try:
+                    # Accessing video_processor property might trigger the error
+                    _ = getattr(processor, "video_processor", None)
+                except Exception:
+                    try:
+                        processor.video_processor = None
+                    except Exception:
+                        pass
+
+            # Choose the right model class. dots.ocr model card recommends AutoModelForCausalLM
+            model_class = AutoModelForImageTextToText
+            if "dots.ocr" in model_id.lower():
+                model_class = AutoModelForCausalLM
+
+            try:
+                model = model_class.from_pretrained(
+                    model_id,
+                    trust_remote_code=True,
+                    torch_dtype=self.torch_dtype,
+                    device_map="auto" if self.device == "cuda" else None
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to load with {model_class.__name__}, trying AutoModel: {e}")
+                model = AutoModel.from_pretrained(
+                    model_id,
+                    trust_remote_code=True,
+                    torch_dtype=self.torch_dtype,
+                    device_map="auto" if self.device == "cuda" else None
+                )
 
         if hasattr(model, "to"):
             model = model.to(self.device)
@@ -271,21 +316,63 @@ class LocalVLMClient:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": user_prompt},
-            ],
-        })
+        
+        # Check if the model is Qwen2-VL based (common for DOTS)
+        is_qwen2_vl = "qwen2_vl" in str(getattr(model.config, "model_type", "")).lower()
+        
+        if is_qwen2_vl:
+            # Qwen2-VL specifically handles image tokens in a certain way
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image", 
+                        "image": image,
+                        # DOTS often works better with original resolution or high-res
+                        "resized_height": image.height,
+                        "resized_width": image.width,
+                    },
+                    {"type": "text", "text": user_prompt},
+                ],
+            })
+        else:
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": user_prompt},
+                ],
+            })
 
         # Apply chat template and process
         text_input = processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        inputs = processor(
-            text=[text_input], images=[image], return_tensors="pt", padding=True
-        )
+        
+        # Prepare inputs with special handling for potential Qwen2-VL processor issues
+        try:
+            inputs = processor(
+                text=[text_input], 
+                images=[image], 
+                return_tensors="pt", 
+                padding=True
+            )
+        except Exception as e:
+            if "Unrecognized video processor" in str(e):
+                # Fallback: manually prepare inputs if the processor is getting confused about video
+                print("Detected 'Unrecognized video processor' error. Attempting fallback input preparation...")
+                # Some models need images=None if they handle vision via different keys
+                inputs = processor(
+                    text=[text_input],
+                    return_tensors="pt",
+                    padding=True
+                )
+                # Manually add pixel values if they were missed
+                if "pixel_values" not in inputs:
+                    vision_inputs = processor(images=[image], return_tensors="pt")
+                    inputs.update(vision_inputs)
+            else:
+                raise e
 
         # Move to device
         for k, v in inputs.items():

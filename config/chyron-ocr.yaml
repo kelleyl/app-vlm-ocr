@@ -6,7 +6,7 @@
 # Usage with dots-ocr model (requires GPU):
 #   python cli.py \
 #     --config config/chyron-ocr.yaml \
-#     --hfModel NielsRogge/dots.llm.7b \
+#     --hfModel rednote-hilab/dots.ocr \
 #     --tfLabel Chyron \
 #     input.mmif output.mmif
 #
@@ -18,7 +18,7 @@
 #     input.mmif output.mmif
 #
 # Note:
-#   - dots-ocr (NielsRogge/dots.llm.7b) is OCR-specialized and requires CUDA GPU
+#   - dots-ocr (rednote-hilab/dots.ocr) is OCR-specialized and requires CUDA GPU
 #   - Use --tfLabel to filter which TimeFrame labels to process
 #   - Use --allTargets to process all targets within TimeFrames (not just representative)
 

@@ -31,14 +31,14 @@ logger = logging.getLogger(__name__)
 
 # Models to run by default (GPU-required OCR models)
 DEFAULT_MODELS = [
-    "hf:NielsRogge/dots.llm.7b",      # dots.ocr
+    "hf:rednote-hilab/dots.ocr",      # dots.ocr
     "hf:echo840/Monkey-Chat",          # monkey OCR
     "hf:deepseek-ai/deepseek-vl2-small",  # deepseek OCR
 ]
 
 # Model name mapping for directory names
 MODEL_DIR_NAMES = {
-    "hf:NielsRogge/dots.llm.7b": "dots-ocr",
+    "hf:rednote-hilab/dots.ocr": "dots-ocr",
     "hf:echo840/Monkey-Chat": "monkey-ocr",
     "hf:deepseek-ai/deepseek-vl2-small": "deepseek-ocr",
     "hf:Qwen/Qwen2-VL-2B-Instruct": "qwen2-vl-2b",

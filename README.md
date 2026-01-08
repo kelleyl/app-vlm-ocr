@@ -30,7 +30,7 @@ The app supports multiple VLM backends via a LiteLLM-style interface:
 | `Qwen/Qwen2-VL-2B-Instruct` | HuggingFace | No | ✅ Verified | Works on CPU/GPU |
 | `Qwen/Qwen2-VL-7B-Instruct` | HuggingFace | No | ✅ Verified | Higher quality, more memory |
 | `llama3.2-vision` | Ollama | No | ✅ Verified | Requires Ollama server |
-| `NielsRogge/dots.llm.7b` | HuggingFace | Yes | 🔬 Untested | OCR-specialized |
+| `rednote-hilab/dots.ocr` | HuggingFace | Yes | 🔬 Untested | OCR-specialized |
 | `echo840/Monkey-Chat` | HuggingFace | Yes | 🔬 Untested | Monkey OCR |
 | `deepseek-ai/deepseek-vl2-small` | HuggingFace | Yes | 🔬 Untested | DeepSeek VL2 |
 
