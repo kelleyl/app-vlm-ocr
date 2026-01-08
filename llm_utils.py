@@ -90,11 +90,18 @@ TESTED_MODELS: List[TestedModel] = [
         notes="DeepSeek VL2 model, requires CUDA GPU",
     ),
     TestedModel(
-        name="deepseek-ocr",
+        name="deepseek-ocr-official",
         backend=Backend.HUGGINGFACE,
         model_id="deepseek-ai/DeepSeek-OCR",
         requires_gpu=True,
-        notes="DeepSeek-OCR (custom infer API), requires CUDA GPU; best with flash-attn",
+        notes="DeepSeek-OCR (official; custom infer API), requires CUDA GPU; best with flash-attn",
+    ),
+    TestedModel(
+        name="deepseek-ocr",
+        backend=Backend.HUGGINGFACE,
+        model_id="prithivMLmods/DeepSeek-OCR-Latest-BF16.I64",
+        requires_gpu=True,
+        notes="DeepSeek-OCR-Latest (tested with transformers 4.57.x; custom infer API), requires CUDA GPU",
     ),
     # Ollama models
     TestedModel(
@@ -252,8 +259,14 @@ class LocalVLMClient:
             warnings.filterwarnings("ignore", message=".*preprocessor.json.*deprecated.*")
             
             # DeepSeek-OCR uses a custom model.infer() API (no AutoProcessor chat template).
-            # Model card: https://huggingface.co/deepseek-ai/DeepSeek-OCR
-            if model_id.lower() == "deepseek-ai/deepseek-ocr":
+            # Model cards:
+            # - https://huggingface.co/deepseek-ai/DeepSeek-OCR
+            # - https://huggingface.co/prithivMLmods/DeepSeek-OCR-Latest-BF16.I64
+            deepseek_ocr_ids = {
+                "deepseek-ai/deepseek-ocr",
+                "prithivmlmods/deepseek-ocr-latest-bf16.i64",
+            }
+            if model_id.lower() in deepseek_ocr_ids:
                 from transformers import AutoTokenizer
 
                 tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
@@ -265,6 +278,12 @@ class LocalVLMClient:
                 )
                 if hasattr(model, "to"):
                     model = model.to(self.device)
+                    # DeepSeek-OCR docs recommend BF16 on CUDA.
+                    if self.device == "cuda":
+                        try:
+                            model = model.to(torch.bfloat16)
+                        except Exception:
+                            pass
                 if hasattr(model, "eval"):
                     model.eval()
 
@@ -484,7 +503,11 @@ class LocalVLMClient:
         model = loaded["model"]
 
         # DeepSeek-OCR custom path (model.infer(tokenizer, prompt, image_file, ...))
-        if model_id.lower() == "deepseek-ai/deepseek-ocr":
+        deepseek_ocr_ids = {
+            "deepseek-ai/deepseek-ocr",
+            "prithivmlmods/deepseek-ocr-latest-bf16.i64",
+        }
+        if model_id.lower() in deepseek_ocr_ids:
             tokenizer = loaded.get("tokenizer")
             if tokenizer is None:
                 raise RuntimeError("DeepSeek-OCR tokenizer missing from cache entry.")

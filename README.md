@@ -32,7 +32,8 @@ The app supports multiple VLM backends via a LiteLLM-style interface:
 | `llama3.2-vision` | Ollama | No | ✅ Verified | Requires Ollama server |
 | `rednote-hilab/dots.ocr` | HuggingFace | Yes | 🔬 Untested | OCR-specialized |
 | `echo840/Monkey-Chat` | HuggingFace | Yes | 🔬 Untested | Monkey OCR |
-| `deepseek-ai/DeepSeek-OCR` | HuggingFace | Yes | 🔬 Untested | DeepSeek-OCR (custom `infer()` API) |
+| `prithivMLmods/DeepSeek-OCR-Latest-BF16.I64` | HuggingFace | Yes | 🔬 Untested | DeepSeek-OCR “latest” (Transformers 4.57.x; custom `infer()` API) |
+| `deepseek-ai/DeepSeek-OCR` | HuggingFace | Yes | 🔬 Untested | DeepSeek-OCR official (custom `infer()` API) |
 | `deepseek-ai/deepseek-vl2-small` | HuggingFace | Yes | 🔬 Untested | DeepSeek VL2 |
 
 ## Installation
@@ -56,8 +57,9 @@ pip install -r requirements.txt
 
 #### Transformers version note (DeepSeek-OCR)
 
-- This repo allows **Transformers 4.x** via `transformers>=4.46.3,<5.0` (see `requirements.txt`).
-- The DeepSeek-OCR model card shows a tested stack with `transformers==4.46.3` and `tokenizers==0.20.3` ([DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR)).
+- This repo allows **Transformers 4.x** via `transformers>=4.57.1,<5.0` (see `requirements.txt`).
+- The alternative DeepSeek-OCR implementation `prithivMLmods/DeepSeek-OCR-Latest-BF16.I64` is tested with `transformers==4.57.1` and supports up to `transformers==4.57.2` per its model card ([DeepSeek-OCR-Latest-BF16.I64](https://huggingface.co/prithivMLmods/DeepSeek-OCR-Latest-BF16.I64)).
+- The official model card is here for reference ([DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR)).
 
 ### Starting Backend Servers
 

@@ -33,14 +33,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODELS = [
     "hf:rednote-hilab/dots.ocr",      # dots.ocr
     "hf:echo840/Monkey-Chat",          # monkey OCR
-    "hf:deepseek-ai/DeepSeek-OCR",        # DeepSeek-OCR
+    "hf:prithivMLmods/DeepSeek-OCR-Latest-BF16.I64",  # DeepSeek-OCR latest
 ]
 
 # Model name mapping for directory names
 MODEL_DIR_NAMES = {
     "hf:rednote-hilab/dots.ocr": "dots-ocr",
     "hf:echo840/Monkey-Chat": "monkey-ocr",
-    "hf:deepseek-ai/DeepSeek-OCR": "deepseek-ocr",
+    "hf:prithivMLmods/DeepSeek-OCR-Latest-BF16.I64": "deepseek-ocr",
+    "hf:deepseek-ai/DeepSeek-OCR": "deepseek-ocr-official",
     "hf:deepseek-ai/deepseek-vl2-small": "deepseek-vl2-small",
     "hf:Qwen/Qwen2-VL-2B-Instruct": "qwen2-vl-2b",
     "hf:Qwen/Qwen2-VL-7B-Instruct": "qwen2-vl-7b",
