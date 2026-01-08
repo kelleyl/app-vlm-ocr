@@ -244,35 +244,52 @@ class LocalVLMClient:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*preprocessor.json.*deprecated.*")
             
-            # For dots.ocr and similar Qwen2-VL based models, AutoProcessor.from_pretrained 
-            # can be finicky due to custom code implementation of chat templates.
-            try:
-                # 1. Try loading normally
-                processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-            except Exception as e:
-                error_str = str(e).lower()
-                if "chat_template" in error_str or "multiple values" in error_str:
-                    self.logger.warning(f"Caught processor loading error for {model_id}, attempting specialized Qwen2-VL workaround...")
-                    
-                    # Workaround: Manually construct a Qwen2VLProcessor. 
-                    # This bypasses the buggy DotsVLProcessor custom code while keeping 
-                    # compatibility with the Qwen2-VL architecture dots.ocr uses.
+            processor = None
+
+            # dots.ocr is a Qwen2-VL-based model with custom remote processor code that can
+            # break across transformers versions (notably around chat_template wiring).
+            # To avoid issues like:
+            #   DotsVLProcessor.__init__() got multiple values for argument 'chat_template'
+            # we prefer a "vanilla" Qwen2VLProcessor path and only fall back to AutoProcessor.
+            is_dots_ocr = "dots.ocr" in model_id.lower()
+            if is_dots_ocr:
+                try:
+                    from transformers import Qwen2VLProcessor
+                    self.logger.info(f"{model_id}: loading processor via Qwen2VLProcessor.from_pretrained (bypassing remote DotsVLProcessor)")
+                    processor = Qwen2VLProcessor.from_pretrained(model_id, trust_remote_code=True)
+                except Exception as e_qwen:
+                    self.logger.warning(f"{model_id}: Qwen2VLProcessor.from_pretrained failed ({e_qwen}); trying manual tokenizer/image_processor construction")
                     try:
                         from transformers import Qwen2VLProcessor, AutoTokenizer, AutoImageProcessor
-                        self.logger.info(f"Loading tokenizer and image_processor separately for {model_id}...")
                         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
                         image_processor = AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
-                        
-                        # Create a standard Qwen2VLProcessor using the model's components
                         processor = Qwen2VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
-                        self.logger.info("Successfully initialized standard Qwen2VLProcessor as a workaround.")
-                    except Exception as e_workaround:
-                        self.logger.error(f"Specialized workaround failed: {e_workaround}")
-                        # Final fallback: try AutoProcessor one last time with no extra arguments 
-                        # but trust_remote_code=False, though this is unlikely to work for this model.
+                    except Exception as e_manual:
+                        self.logger.warning(f"{model_id}: manual Qwen2VLProcessor construction failed ({e_manual}); falling back to AutoProcessor")
+
+            if processor is None:
+                # General path: AutoProcessor (may execute remote code)
+                try:
+                    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+                except Exception as e:
+                    error_str = str(e).lower()
+                    # If this is the known chat_template duplication issue, retry with the
+                    # safe Qwen2VLProcessor workaround (covers non-dots Qwen2-VL forks).
+                    if "chat_template" in error_str or "multiple values" in error_str:
+                        self.logger.warning(
+                            f"Caught processor loading error for {model_id} ({e}); attempting Qwen2VLProcessor workaround..."
+                        )
+                        try:
+                            from transformers import Qwen2VLProcessor, AutoTokenizer, AutoImageProcessor
+                            tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+                            image_processor = AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
+                            processor = Qwen2VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
+                            self.logger.info(f"{model_id}: initialized Qwen2VLProcessor workaround successfully.")
+                        except Exception as e_workaround:
+                            self.logger.error(f"{model_id}: Qwen2VLProcessor workaround failed: {e_workaround}")
+                            raise e
+                    else:
                         raise e
-                else:
-                    raise e
             
             # Workaround for 'Unrecognized video processor' error in some transformers versions
             # when video_preprocessor_config.json is missing (common in Qwen2-VL/dots-ocr)
