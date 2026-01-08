@@ -245,23 +245,39 @@ class LocalVLMClient:
             warnings.filterwarnings("ignore", message=".*preprocessor.json.*deprecated.*")
             
             # For dots.ocr and similar Qwen2-VL based models, AutoProcessor.from_pretrained 
-            # can be finicky. We try to load it normally first.
+            # can be finicky due to custom code implementation of chat templates.
             try:
+                # 1. Try loading normally
                 processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
             except Exception as e:
-                # If we get "multiple values for chat_template", it's a known bug in 
-                # transformers factory when loading some custom processors.
-                if "chat_template" in str(e):
-                    self.logger.warning(f"Caught chat_template error, attempting workaround for {model_id}")
-                    # Workaround: Load without passing chat_template if it's already in the config
-                    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, chat_template=None)
+                error_str = str(e).lower()
+                if "chat_template" in error_str or "multiple values" in error_str:
+                    self.logger.warning(f"Caught processor loading error for {model_id}, attempting workarounds...")
+                    
+                    # Workaround A: Load tokenizer separately and pass it to AutoProcessor
+                    try:
+                        from transformers import AutoTokenizer
+                        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+                        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, tokenizer=tokenizer)
+                        self.logger.info("Successfully loaded processor using Workaround A (tokenizer bypass)")
+                    except Exception as e2:
+                        self.logger.warning(f"Workaround A failed: {e2}")
+                        
+                        # Workaround B: Fallback to the base Qwen2VLProcessor (dots.ocr is based on Qwen2-VL)
+                        try:
+                            from transformers import Qwen2VLProcessor
+                            processor = Qwen2VLProcessor.from_pretrained(model_id)
+                            self.logger.info(f"Successfully loaded processor using Workaround B (Qwen2VLProcessor fallback)")
+                        except Exception as e3:
+                            self.logger.error(f"All processor workarounds failed for {model_id}")
+                            raise e3
                 else:
                     raise e
             
             # Workaround for 'Unrecognized video processor' error in some transformers versions
             # when video_preprocessor_config.json is missing (common in Qwen2-VL/dots-ocr)
             # This is only needed if the model hasn't been patched locally.
-            if not hasattr(processor, "video_processor") or processor.video_processor is None:
+            if processor is not None and (not hasattr(processor, "video_processor") or processor.video_processor is None):
                 try:
                     # Accessing video_processor property might trigger the error
                     _ = getattr(processor, "video_processor", None)
