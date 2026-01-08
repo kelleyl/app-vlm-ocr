@@ -83,11 +83,18 @@ TESTED_MODELS: List[TestedModel] = [
         notes="Monkey OCR model, requires CUDA GPU",
     ),
     TestedModel(
-        name="deepseek-ocr",
+        name="deepseek-vl2-small",
         backend=Backend.HUGGINGFACE,
         model_id="deepseek-ai/deepseek-vl2-small",
         requires_gpu=True,
         notes="DeepSeek VL2 model, requires CUDA GPU",
+    ),
+    TestedModel(
+        name="deepseek-ocr",
+        backend=Backend.HUGGINGFACE,
+        model_id="deepseek-ai/DeepSeek-OCR",
+        requires_gpu=True,
+        notes="DeepSeek-OCR (custom infer API), requires CUDA GPU; best with flash-attn",
     ),
     # Ollama models
     TestedModel(
@@ -244,6 +251,27 @@ class LocalVLMClient:
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message=".*preprocessor.json.*deprecated.*")
             
+            # DeepSeek-OCR uses a custom model.infer() API (no AutoProcessor chat template).
+            # Model card: https://huggingface.co/deepseek-ai/DeepSeek-OCR
+            if model_id.lower() == "deepseek-ai/deepseek-ocr":
+                from transformers import AutoTokenizer
+
+                tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+                # Prefer AutoModel (remote code provides infer()).
+                model = AutoModel.from_pretrained(
+                    model_id,
+                    trust_remote_code=True,
+                    use_safetensors=True,
+                )
+                if hasattr(model, "to"):
+                    model = model.to(self.device)
+                if hasattr(model, "eval"):
+                    model.eval()
+
+                cache_entry = {"tokenizer": tokenizer, "model": model, "processor": None}
+                self._hf_cache[model_id] = cache_entry
+                return cache_entry
+
             processor = None
 
             # dots.ocr is a Qwen2-VL-based model with custom remote processor code that can
@@ -454,6 +482,52 @@ class LocalVLMClient:
         loaded = self._load_huggingface(model_id)
         processor = loaded["processor"]
         model = loaded["model"]
+
+        # DeepSeek-OCR custom path (model.infer(tokenizer, prompt, image_file, ...))
+        if model_id.lower() == "deepseek-ai/deepseek-ocr":
+            tokenizer = loaded.get("tokenizer")
+            if tokenizer is None:
+                raise RuntimeError("DeepSeek-OCR tokenizer missing from cache entry.")
+            if not hasattr(model, "infer"):
+                raise RuntimeError("DeepSeek-OCR model does not expose an infer() method (trust_remote_code issue?).")
+
+            import tempfile
+            import os
+
+            prompt_text = (user_prompt or "").strip() or "Free OCR."
+            if system_prompt and system_prompt.strip():
+                prompt_text = f"{system_prompt.strip()}\n{prompt_text}"
+
+            # DeepSeek-OCR expects prompts prefixed with <image>\n
+            prompt = f"<image>\n{prompt_text}"
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                image_path = os.path.join(tmpdir, "frame.png")
+                image.save(image_path, format="PNG")
+
+                # Let the model pick defaults; set a reasonable doc-OCR-friendly preset.
+                res = model.infer(
+                    tokenizer,
+                    prompt=prompt,
+                    image_file=image_path,
+                    output_path=tmpdir,
+                    base_size=1024,
+                    image_size=640,
+                    crop_mode=True,
+                    save_results=False,
+                    test_compress=False,
+                )
+
+            # Best-effort normalization across possible return shapes
+            if isinstance(res, str):
+                return res.strip()
+            if isinstance(res, dict):
+                for k in ("text", "result", "pred", "output", "markdown", "response"):
+                    v = res.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+                return str(res).strip()
+            return str(res).strip()
 
         # Build messages for chat template
         messages = []

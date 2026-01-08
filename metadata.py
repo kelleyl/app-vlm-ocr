@@ -15,14 +15,16 @@ from llm_utils import TESTED_MODELS as LLM_TESTED_MODELS, Backend
 # Default model - MLX backend for Apple Silicon (local development)
 # For GPU servers, use: hf:rednote-hilab/dots.ocr (dots-ocr)
 #                    or: hf:echo840/Monkey-Chat (monkey-ocr)
-#                    or: hf:deepseek-ai/deepseek-vl2-small (deepseek-ocr)
+#                    or: hf:deepseek-ai/DeepSeek-OCR (deepseek-ocr)
+#                    or: hf:deepseek-ai/deepseek-vl2-small (deepseek-vl2-small)
 DEFAULT_MODEL = "mlx:mlx-community/Qwen2-VL-2B-Instruct-4bit"
 
 # OCR-specialized models (for batch processing on GPU servers)
 OCR_MODELS = [
     "hf:rednote-hilab/dots.ocr",       # dots-ocr
     "hf:echo840/Monkey-Chat",           # monkey-ocr  
-    "hf:deepseek-ai/deepseek-vl2-small",  # deepseek-ocr
+    "hf:deepseek-ai/DeepSeek-OCR",      # deepseek-ocr
+    "hf:deepseek-ai/deepseek-vl2-small",  # deepseek-vl2-small
 ]
 
 # Tested model IDs for metadata display (with backend prefix)
