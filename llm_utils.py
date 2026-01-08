@@ -304,6 +304,30 @@ class LocalVLMClient:
 
                             video_processor = _NoOpVideoProcessor()
 
+                    # Some models (including dots.ocr) ship only a deprecated `preprocessor.json`.
+                    # In that case, AutoVideoProcessor can mistakenly return an *image* processor,
+                    # which then fails Qwen2VLProcessor's BaseVideoProcessor type checks.
+                    try:
+                        from transformers.video_processing_utils import BaseVideoProcessor  # type: ignore
+                    except Exception:
+                        BaseVideoProcessor = None  # type: ignore
+
+                    if BaseVideoProcessor is not None and video_processor is not None:
+                        if not isinstance(video_processor, BaseVideoProcessor):
+                            self.logger.warning(
+                                f"{model_id}: loaded video_processor has unexpected type {type(video_processor)}; "
+                                "replacing with a no-op BaseVideoProcessor (videos unsupported)."
+                            )
+
+                            class _NoOpVideoProcessor(BaseVideoProcessor):  # type: ignore
+                                def __call__(self, *args, **kwargs):
+                                    return {}
+
+                                def preprocess(self, *args, **kwargs):
+                                    return {}
+
+                            video_processor = _NoOpVideoProcessor()
+
                     # Construct with/without video_processor depending on signature
                     sig = inspect.signature(Qwen2VLProcessor.__init__)
                     if "video_processor" in sig.parameters:
@@ -331,9 +355,43 @@ class LocalVLMClient:
                         )
                         try:
                             from transformers import Qwen2VLProcessor, AutoTokenizer, AutoImageProcessor
+                            import inspect
                             tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
                             image_processor = AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
-                            processor = Qwen2VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
+
+                            # Ensure we provide a BaseVideoProcessor (or no-op) if required
+                            video_processor = None
+                            try:
+                                from transformers import AutoVideoProcessor  # type: ignore
+                                video_processor = AutoVideoProcessor.from_pretrained(model_id, trust_remote_code=True)
+                            except Exception:
+                                video_processor = None
+
+                            try:
+                                from transformers.video_processing_utils import BaseVideoProcessor  # type: ignore
+                            except Exception:
+                                BaseVideoProcessor = None  # type: ignore
+
+                            if BaseVideoProcessor is not None:
+                                if video_processor is None or not isinstance(video_processor, BaseVideoProcessor):
+                                    class _NoOpVideoProcessor(BaseVideoProcessor):  # type: ignore
+                                        def __call__(self, *args, **kwargs):
+                                            return {}
+
+                                        def preprocess(self, *args, **kwargs):
+                                            return {}
+
+                                    video_processor = _NoOpVideoProcessor()
+
+                            sig = inspect.signature(Qwen2VLProcessor.__init__)
+                            if "video_processor" in sig.parameters:
+                                processor = Qwen2VLProcessor(
+                                    image_processor=image_processor,
+                                    tokenizer=tokenizer,
+                                    video_processor=video_processor,
+                                )
+                            else:
+                                processor = Qwen2VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
                             self.logger.info(f"{model_id}: initialized Qwen2VLProcessor workaround successfully.")
                         except Exception as e_workaround:
                             self.logger.error(f"{model_id}: Qwen2VLProcessor workaround failed: {e_workaround}")
