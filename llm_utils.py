@@ -516,6 +516,8 @@ class LocalVLMClient:
 
             import tempfile
             import os
+            import json
+            import inspect
 
             prompt_text = (user_prompt or "").strip() or "Free OCR."
             if system_prompt and system_prompt.strip():
@@ -528,29 +530,81 @@ class LocalVLMClient:
                 image_path = os.path.join(tmpdir, "frame.png")
                 image.save(image_path, format="PNG")
 
-                # Let the model pick defaults; set a reasonable doc-OCR-friendly preset.
-                res = model.infer(
-                    tokenizer,
+                # Some DeepSeek-OCR forks print results but may return None unless save_results/eval_mode are set.
+                # Use the documented args when supported (and filter by signature for compatibility).
+                infer_kwargs = dict(
                     prompt=prompt,
                     image_file=image_path,
                     output_path=tmpdir,
                     base_size=1024,
                     image_size=640,
                     crop_mode=True,
-                    save_results=False,
-                    test_compress=False,
+                    save_results=True,
+                    test_compress=True,
+                    eval_mode=True,
                 )
+                try:
+                    sig = inspect.signature(model.infer)  # type: ignore[misc]
+                    infer_kwargs = {k: v for k, v in infer_kwargs.items() if k in sig.parameters}
+                except Exception:
+                    # If we can't introspect, pass a conservative subset
+                    infer_kwargs = {k: infer_kwargs[k] for k in ("prompt", "image_file", "output_path") if k in infer_kwargs}
+
+                res = model.infer(tokenizer, **infer_kwargs)
+
+                def _extract_text_from_output_dir(out_dir: str) -> str:
+                    # Look for common outputs: .md/.txt, or JSON with a text field.
+                    try:
+                        entries = sorted(os.listdir(out_dir))
+                    except Exception:
+                        return ""
+
+                    # Prefer explicit text-like files first
+                    preferred_exts = (".md", ".markdown", ".txt")
+                    for fn in entries:
+                        if fn.lower().endswith(preferred_exts):
+                            try:
+                                with open(os.path.join(out_dir, fn), "r", encoding="utf-8", errors="ignore") as f:
+                                    s = f.read().strip()
+                                if s and s.lower() != "none":
+                                    return s
+                            except Exception:
+                                continue
+
+                    # Then try JSON
+                    for fn in entries:
+                        if fn.lower().endswith(".json"):
+                            try:
+                                with open(os.path.join(out_dir, fn), "r", encoding="utf-8", errors="ignore") as f:
+                                    obj = json.load(f)
+                                if isinstance(obj, dict):
+                                    for k in ("text", "result", "pred", "output", "markdown", "response", "content"):
+                                        v = obj.get(k)
+                                        if isinstance(v, str) and v.strip() and v.strip().lower() != "none":
+                                            return v.strip()
+                            except Exception:
+                                continue
+
+                    return ""
+
+                # If infer() returned nothing useful, try reading from output dir
+                if res is None or (isinstance(res, str) and (not res.strip() or res.strip().lower() == "none")):
+                    res = _extract_text_from_output_dir(tmpdir) or res
 
             # Best-effort normalization across possible return shapes
+            if res is None:
+                return ""
             if isinstance(res, str):
-                return res.strip()
+                s = res.strip()
+                return "" if s.lower() == "none" else s
             if isinstance(res, dict):
                 for k in ("text", "result", "pred", "output", "markdown", "response"):
                     v = res.get(k)
                     if isinstance(v, str) and v.strip():
                         return v.strip()
                 return str(res).strip()
-            return str(res).strip()
+            s = str(res).strip()
+            return "" if s.lower() == "none" else s
 
         # Build messages for chat template
         messages = []
