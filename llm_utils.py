@@ -254,23 +254,30 @@ class LocalVLMClient:
                 if "chat_template" in error_str or "multiple values" in error_str:
                     self.logger.warning(f"Caught processor loading error for {model_id}, attempting workarounds...")
                     
-                    # Workaround A: Load tokenizer separately and pass it to AutoProcessor
+                    # Workaround A: Try with chat_template=None to avoid multiple values error
                     try:
-                        from transformers import AutoTokenizer
-                        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-                        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, tokenizer=tokenizer)
-                        self.logger.info("Successfully loaded processor using Workaround A (tokenizer bypass)")
+                        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, chat_template=None)
+                        self.logger.info("Successfully loaded processor using Workaround A (chat_template=None)")
                     except Exception as e2:
                         self.logger.warning(f"Workaround A failed: {e2}")
                         
-                        # Workaround B: Fallback to the base Qwen2VLProcessor (dots.ocr is based on Qwen2-VL)
+                        # Workaround B: Load tokenizer separately and pass it to AutoProcessor with chat_template=None
                         try:
-                            from transformers import Qwen2VLProcessor
-                            processor = Qwen2VLProcessor.from_pretrained(model_id)
-                            self.logger.info(f"Successfully loaded processor using Workaround B (Qwen2VLProcessor fallback)")
+                            from transformers import AutoTokenizer
+                            tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+                            processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, tokenizer=tokenizer, chat_template=None)
+                            self.logger.info("Successfully loaded processor using Workaround B (tokenizer + chat_template=None)")
                         except Exception as e3:
-                            self.logger.error(f"All processor workarounds failed for {model_id}")
-                            raise e3
+                            self.logger.warning(f"Workaround B failed: {e3}")
+                            
+                            # Workaround C: Fallback to the base Qwen2VLProcessor (dots.ocr is based on Qwen2-VL)
+                            try:
+                                from transformers import Qwen2VLProcessor
+                                processor = Qwen2VLProcessor.from_pretrained(model_id)
+                                self.logger.info(f"Successfully loaded processor using Workaround C (Qwen2VLProcessor fallback)")
+                            except Exception as e4:
+                                self.logger.error(f"All processor workarounds failed for {model_id}")
+                                raise e4
                 else:
                     raise e
             
@@ -388,15 +395,23 @@ class LocalVLMClient:
             if "dots.ocr" in model_id.lower() and max_tokens < 4096:
                 max_tokens = 4096 # DOTS can produce very long JSON for complex layouts
                 
+            self.logger.debug(f"Starting generation with {max_tokens} max tokens...")
             generated_ids = model.generate(**inputs, max_new_tokens=max_tokens)
+            self.logger.debug(f"Generation complete. Output shape: {generated_ids.shape}")
 
         # Trim input tokens from output
         input_len = inputs["input_ids"].shape[1]
         generated_ids_trimmed = generated_ids[:, input_len:]
+        
+        self.logger.debug(f"Input length: {input_len}, Trimmed output shape: {generated_ids_trimmed.shape}")
 
         result = processor.batch_decode(
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0]
+        
+        if not result.strip():
+            self.logger.warning(f"Model {model_id} produced an empty result.")
+            self.logger.debug(f"Raw generated IDs (first 10): {generated_ids_trimmed[0, :10].tolist() if generated_ids_trimmed.shape[1] > 0 else 'EMPTY'}")
 
         return result.strip()
 
