@@ -252,32 +252,25 @@ class LocalVLMClient:
             except Exception as e:
                 error_str = str(e).lower()
                 if "chat_template" in error_str or "multiple values" in error_str:
-                    self.logger.warning(f"Caught processor loading error for {model_id}, attempting workarounds...")
+                    self.logger.warning(f"Caught processor loading error for {model_id}, attempting specialized Qwen2-VL workaround...")
                     
-                    # Workaround A: Try with chat_template=None to avoid multiple values error
+                    # Workaround: Manually construct a Qwen2VLProcessor. 
+                    # This bypasses the buggy DotsVLProcessor custom code while keeping 
+                    # compatibility with the Qwen2-VL architecture dots.ocr uses.
                     try:
-                        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, chat_template=None)
-                        self.logger.info("Successfully loaded processor using Workaround A (chat_template=None)")
-                    except Exception as e2:
-                        self.logger.warning(f"Workaround A failed: {e2}")
+                        from transformers import Qwen2VLProcessor, AutoTokenizer, AutoImageProcessor
+                        self.logger.info(f"Loading tokenizer and image_processor separately for {model_id}...")
+                        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+                        image_processor = AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
                         
-                        # Workaround B: Load tokenizer separately and pass it to AutoProcessor with chat_template=None
-                        try:
-                            from transformers import AutoTokenizer
-                            tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-                            processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, tokenizer=tokenizer, chat_template=None)
-                            self.logger.info("Successfully loaded processor using Workaround B (tokenizer + chat_template=None)")
-                        except Exception as e3:
-                            self.logger.warning(f"Workaround B failed: {e3}")
-                            
-                            # Workaround C: Fallback to the base Qwen2VLProcessor (dots.ocr is based on Qwen2-VL)
-                            try:
-                                from transformers import Qwen2VLProcessor
-                                processor = Qwen2VLProcessor.from_pretrained(model_id)
-                                self.logger.info(f"Successfully loaded processor using Workaround C (Qwen2VLProcessor fallback)")
-                            except Exception as e4:
-                                self.logger.error(f"All processor workarounds failed for {model_id}")
-                                raise e4
+                        # Create a standard Qwen2VLProcessor using the model's components
+                        processor = Qwen2VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
+                        self.logger.info("Successfully initialized standard Qwen2VLProcessor as a workaround.")
+                    except Exception as e_workaround:
+                        self.logger.error(f"Specialized workaround failed: {e_workaround}")
+                        # Final fallback: try AutoProcessor one last time with no extra arguments 
+                        # but trust_remote_code=False, though this is unlikely to work for this model.
+                        raise e
                 else:
                     raise e
             
