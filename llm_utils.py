@@ -254,18 +254,68 @@ class LocalVLMClient:
             is_dots_ocr = "dots.ocr" in model_id.lower()
             if is_dots_ocr:
                 try:
-                    from transformers import Qwen2VLProcessor
-                    self.logger.info(f"{model_id}: loading processor via Qwen2VLProcessor.from_pretrained (bypassing remote DotsVLProcessor)")
-                    processor = Qwen2VLProcessor.from_pretrained(model_id, trust_remote_code=True)
-                except Exception as e_qwen:
-                    self.logger.warning(f"{model_id}: Qwen2VLProcessor.from_pretrained failed ({e_qwen}); trying manual tokenizer/image_processor construction")
+                    # Prefer manual construction so we can explicitly provide a proper video_processor
+                    # (transformers>=4.46 enforces BaseVideoProcessor types).
+                    from transformers import Qwen2VLProcessor, AutoTokenizer, AutoImageProcessor
+                    import inspect
+
+                    self.logger.info(f"{model_id}: loading tokenizer/image_processor for Qwen2VLProcessor (bypassing remote DotsVLProcessor)")
+                    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+                    image_processor = AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+                    video_processor = None
+                    # Attempt 1: AutoVideoProcessor (preferred if available)
                     try:
-                        from transformers import Qwen2VLProcessor, AutoTokenizer, AutoImageProcessor
-                        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-                        image_processor = AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
+                        from transformers import AutoVideoProcessor  # type: ignore
+                        video_processor = AutoVideoProcessor.from_pretrained(model_id, trust_remote_code=True)
+                    except Exception as e_avp:
+                        # Attempt 2: model-specific video processor class if present
+                        try:
+                            import transformers as _tf
+                            for _name in ("Qwen2VLVideoProcessor", "Qwen2VideoProcessor"):
+                                _cls = getattr(_tf, _name, None)
+                                if _cls is None:
+                                    continue
+                                try:
+                                    video_processor = _cls.from_pretrained(model_id, trust_remote_code=True)
+                                    break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
+
+                        if video_processor is None:
+                            # Final fallback: create a no-op BaseVideoProcessor so Qwen2VLProcessor
+                            # can be constructed for image-only use-cases.
+                            self.logger.warning(
+                                f"{model_id}: could not load a video processor ({e_avp}); using a no-op video processor (videos unsupported)."
+                            )
+                            try:
+                                from transformers.video_processing_utils import BaseVideoProcessor  # type: ignore
+                            except Exception:
+                                BaseVideoProcessor = object  # type: ignore
+
+                            class _NoOpVideoProcessor(BaseVideoProcessor):  # type: ignore
+                                def __call__(self, *args, **kwargs):
+                                    return {}
+
+                                def preprocess(self, *args, **kwargs):
+                                    return {}
+
+                            video_processor = _NoOpVideoProcessor()
+
+                    # Construct with/without video_processor depending on signature
+                    sig = inspect.signature(Qwen2VLProcessor.__init__)
+                    if "video_processor" in sig.parameters:
+                        processor = Qwen2VLProcessor(
+                            image_processor=image_processor,
+                            tokenizer=tokenizer,
+                            video_processor=video_processor,
+                        )
+                    else:
                         processor = Qwen2VLProcessor(image_processor=image_processor, tokenizer=tokenizer)
-                    except Exception as e_manual:
-                        self.logger.warning(f"{model_id}: manual Qwen2VLProcessor construction failed ({e_manual}); falling back to AutoProcessor")
+                except Exception as e_manual:
+                    self.logger.warning(f"{model_id}: manual Qwen2VLProcessor construction failed ({e_manual}); falling back to AutoProcessor")
 
             if processor is None:
                 # General path: AutoProcessor (may execute remote code)
